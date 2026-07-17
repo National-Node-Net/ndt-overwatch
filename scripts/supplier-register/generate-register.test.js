@@ -577,7 +577,7 @@ test('main execution', async (t) => {
         }
       }
     };
-    const mockContext = { repo: { owner: 'National-Digital-Twin' } };
+    const mockContext = { repo: { owner: 'National-Node-Net' } };
     const mockCore = {
       info: (m) => coreLogs.push(m),
       warning: (m) => coreLogs.push(`WARNING: ${m}`),
