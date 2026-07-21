@@ -41,7 +41,7 @@ This project provides a Software Bill of Materials (SBOM) to help users and inte
 
 ### Current SBOM
 
-Download the [latest SBOM for this codebase](https://github.com/National-Digital-Twin/ndt-overwatch/dependency-graph/sbom) to view the current list of components used in this repository.
+Download the [latest SBOM for this codebase](https://github.com/National-Node-Net/ndt-overwatch/dependency-graph/sbom) to view the current list of components used in this repository.
 
 ## Contributing
 
