@@ -48,17 +48,17 @@ jobs:
 
       - name: Get repository reader token
         id: reader_token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.NODE_NET_REPOSITORY_READER_APP_CLIENT_ID }}
+          app-id: '4265920'
           private-key: ${{ secrets.NODE_NET_REPOSITORY_READER_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
       - name: Get pull request token
         id: pr_token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.NODE_NET_PULL_REQUEST_CONTROLLER_APP_CLIENT_ID }}
+          app-id: '4265970'
           private-key: ${{ secrets.NODE_NET_PULL_REQUEST_CONTROLLER_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-pull-requests: write

@@ -42,8 +42,8 @@ again within six days of the last reminder from the same app (hidden marker
 
 | Token | Used for | App permissions |
 | --- | --- | --- |
-| `NODE_NET_REPOSITORY_READER_APP_*` | Repository list, files, releases, branches, commits and Actions runs | Contents: read, Metadata: read, Actions: read |
-| `NODE_NET_PULL_REQUEST_CONTROLLER_APP_*` | Listing PRs and posting reminders | Pull requests: write |
+| `NODE_NET_REPOSITORY_READER_APP_PRIVATE_KEY` | Repository list, files, releases, branches, commits and Actions runs; App ID is public metadata pinned in the workflow | Contents: read, Metadata: read, Actions: read |
+| `NODE_NET_PULL_REQUEST_CONTROLLER_APP_PRIVATE_KEY` | Listing PRs and posting reminders; App ID is public metadata pinned in the workflow | Pull requests: write |
 
 Both apps must be installed on all repositories; repositories the reader app cannot see are not reported.
 `delete_branch_on_merge` is only returned with Administration: read, which the reader app does not have,
