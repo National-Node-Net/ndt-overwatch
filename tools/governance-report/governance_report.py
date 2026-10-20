@@ -479,10 +479,10 @@ class Scanner:
 
         command = [
             'docker', 'run', '--rm', '-e', 'GITHUB_TOKEN', TRUFFLEHOG_IMAGE,
-            'github', f'--org={self.org}', '--results=verified', '--json', '--no-update', '--no-color',
+            'github', '--results=verified', '--json', '--no-update', '--no-color',
         ]
         for repo in repos:
-            command.append(f'--include-repos={repo["full_name"]}')
+            command.append(f'--repo=https://github.com/{repo["full_name"]}')
         env = dict(os.environ)
         env['GITHUB_TOKEN'] = token
         try:

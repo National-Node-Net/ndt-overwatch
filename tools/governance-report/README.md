@@ -51,7 +51,7 @@ so that column shows N/A until that permission is granted.
 The merge-back check similarly shows N/A until the repository-reader App has Actions: read; its current installation does not have that permission.
 
 Actions must be enabled in `ndt-overwatch` for the workflow to run. The repository-reader App's credentials must be available as organisation Actions secrets and the App must be installed with access to the repositories being scanned and `ospo-resources`.
-The TruffleHog scan needs Docker and a token that can read every selected repository. Its output is captured,
+The TruffleHog scan needs Docker and a token that can read every selected repository. Repositories are passed as explicit URLs rather than enumerated through the organization API. Its output is captured,
 parsed for verified finding counts, and never written to logs or artifacts. In local usage it can read
 `GH_TOKEN`/`GITHUB_TOKEN` or use `gh auth token`; TruffleHog's GitHub source documents classic PAT support.
 The merge-back check shows N/A unless the reader App is granted Actions: read. The branch-setting checks need Administration: read to expose `delete_branch_on_merge`.
