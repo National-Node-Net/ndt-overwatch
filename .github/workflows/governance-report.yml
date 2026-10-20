@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+# Crown Copyright 2026. Developed by the National Digital Twin Programme and legally attributed to the UK's Department for Business, Innovation, Science and Trade (BIST).
+
+# Organisation-wide OSPO governance report. Not listed in organisation-required-workflows.txt:
+# it runs only in ospo-resources and scans every active repository in the organisation.
+
+name: OSPO governance report
+
+on:
+  push:
+    branches:
+      - feature/governance-report
+  schedule:
+    - cron: '17 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      human_pr_days:
+        description: Days a human PR can stay open before it is reported
+        type: number
+        default: 30
+      dependabot_pr_days:
+        description: Days a Dependabot PR can stay open before it is reported
+        type: number
+        default: 14
+      dormant_days:
+        description: Days without non-bot activity before a repository is flagged as dormant
+        type: number
+        default: 180
+      release_days:
+        description: Days of releases to check for an SBOM asset
+        type: number
+        default: 90
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ospo-governance-report
+  cancel-in-progress: false
+
+jobs:
+  governance-report:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Get repository reader token
+        id: reader_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.NODE_NET_REPOSITORY_READER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.NODE_NET_REPOSITORY_READER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Get pull request token
+        id: pr_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.NODE_NET_PULL_REQUEST_CONTROLLER_APP_CLIENT_ID }}
+          private-key: ${{ secrets.NODE_NET_PULL_REQUEST_CONTROLLER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-pull-requests: write
+
+      - name: Checkout OSPO policies and manifests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: National-Node-Net/ospo-resources
+          ref: develop
+          token: ${{ steps.reader_token.outputs.token }}
+          path: ospo-resources
+
+      - name: Install Conftest
+        env:
+          CONFTEST_VERSION: '0.71.1'
+          CONFTEST_SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+        run: |
+          set -euo pipefail
+          file="conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          curl --proto '=https' --fail -sSL -o "$RUNNER_TEMP/$file" \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/${file}"
+          echo "${CONFTEST_SHA256}  $RUNNER_TEMP/$file" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP/bin" conftest
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Scheduled runs post PR reminders; manual runs only report.
+      - name: Generate governance report
+        env:
+          GH_TOKEN: ${{ steps.reader_token.outputs.token }}
+          PR_TOKEN: ${{ steps.pr_token.outputs.token }}
+          REMINDER_AUTHOR: ${{ steps.pr_token.outputs.app-slug }}[bot]
+          HUMAN_PR_DAYS: ${{ github.event.inputs.human_pr_days || '30' }}
+          DEPENDABOT_PR_DAYS: ${{ github.event.inputs.dependabot_pr_days || '14' }}
+          DORMANT_DAYS: ${{ github.event.inputs.dormant_days || '180' }}
+          RELEASE_DAYS: ${{ github.event.inputs.release_days || '90' }}
+        run: |
+          set -euo pipefail
+          args=(
+            --human-pr-days "$HUMAN_PR_DAYS"
+            --dependabot-pr-days "$DEPENDABOT_PR_DAYS"
+            --dormant-days "$DORMANT_DAYS"
+            --release-days "$RELEASE_DAYS"
+            --output-dir governance-report
+          )
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            args+=(--post-reminders --reminder-author "$REMINDER_AUTHOR")
+          fi
+          python3 tools/governance-report/governance_report.py --source-root ospo-resources "${args[@]}"
+
+      - name: Upload governance report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: governance-report
+          path: governance-report/
+          retention-days: 90
+          if-no-files-found: ignore

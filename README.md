@@ -18,6 +18,10 @@ The contents maintained in this repository are designed for use with GitHub.
 
 An automated process to generate a consolidated, de-duplicated register of supplier organisations acknowledged across our public repositories. This register is derived from the `ACKNOWLEDGEMENTS.md` files in each repository and provides a single reference point for reporting and governance purposes.
 
+### Organisation Governance Report
+
+The `OSPO governance report` workflow scans active organisation repositories and produces Markdown, HTML, and JSON dashboards covering governance files, templates, Dependabot policy and pull requests, releases and SBOMs, repository settings, activity, workflow status, and verified TruffleHog findings. It runs weekly and can be dispatched manually after the workflow is available on the default branch. See [`tools/governance-report/README.md`](tools/governance-report/README.md) for check definitions, permissions, and manual-run guidance.
+
 ## Public Funding Acknowledgment
 
 This repository has been developed with public funding as part of the National Digital Twin Programme (NDTP), a UK Government initiative. NDTP, alongside its partners, has invested in this work to advance open, secure, and reusable digital twin technologies for any organisation, whether from the public or private sector, irrespective of size.  
