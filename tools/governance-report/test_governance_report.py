@@ -179,6 +179,14 @@ class OtherCheckTests(unittest.TestCase):
         self.assertEqual(check['status'], gr.FAIL)
         self.assertNotIn('sensitive-example', str(check))
 
+    def test_trufflehog_result_localizes_error_and_suppresses_output(self):
+        repo = {'name': 'repo-a', 'full_name': 'Org/repo-a'}
+        failed = gr.check_trufflehog_result(1, 'scanner stderr with sensitive data', repo)
+        passed = gr.check_trufflehog_result(0, '', repo)
+        self.assertEqual(failed['status'], gr.ERROR)
+        self.assertNotIn('sensitive data', str(failed))
+        self.assertEqual(passed['status'], gr.OK)
+
     def test_dependabot_config(self):
         self.assertEqual(gr.check_dependabot_config(None, [])['status'], gr.FAIL)
         self.assertEqual(gr.check_dependabot_config('.github/dependabot.yml', [], evaluated=False)['status'], gr.NA)

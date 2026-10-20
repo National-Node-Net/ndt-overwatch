@@ -235,6 +235,15 @@ def check_secret_scan(count, *, available=True, error=None, reason=None):
     return result(OK, 'no verified credentials found')
 
 
+def check_trufflehog_result(exit_code, output, repo):
+    counts, unmapped = parse_trufflehog_output(output, [repo])
+    if exit_code != 0:
+        return check_secret_scan(0, error=f'TruffleHog exited with code {exit_code}')
+    if unmapped:
+        return check_secret_scan(0, error=f'{unmapped} verified finding(s) could not be attributed')
+    return check_secret_scan(counts[repo['name']])
+
+
 def check_dependabot_prs(prs, now, stale_days):
     dependabot = [pr for pr in prs if pr['user']['login'] == DEPENDABOT]
     if not dependabot:
@@ -477,30 +486,21 @@ class Scanner:
                 for repo in repos
             }
 
-        command = [
-            'docker', 'run', '--rm', '-e', 'GITHUB_TOKEN', TRUFFLEHOG_IMAGE,
-            'github', '--results=verified', '--json', '--no-update', '--no-color',
-        ]
+        results = {}
         for repo in repos:
-            command.append(f'--repo=https://github.com/{repo["full_name"]}')
-        env = dict(os.environ)
-        env['GITHUB_TOKEN'] = token
-        try:
-            scan = subprocess.run(command, text=True, capture_output=True, timeout=1800, env=env)
-        except (subprocess.TimeoutExpired, OSError):
-            return {repo['name']: check_secret_scan(0, error='TruffleHog scan did not complete') for repo in repos}
-
-        if scan.returncode != 0:
-            return {
-                repo['name']: check_secret_scan(0, error=f'TruffleHog exited with code {scan.returncode}')
-                for repo in repos
-            }
-        counts, unmapped = parse_trufflehog_output(scan.stdout, repos)
-        results = {name: check_secret_scan(count) for name, count in counts.items()}
-        if unmapped:
-            for name, count in counts.items():
-                if not count:
-                    results[name] = check_secret_scan(0, error=f'{unmapped} verified finding(s) could not be attributed')
+            command = [
+                'docker', 'run', '--rm', '-e', 'GITHUB_TOKEN', TRUFFLEHOG_IMAGE,
+                'github', f'--repo=https://github.com/{repo["full_name"]}',
+                '--results=verified', '--json', '--no-update', '--no-color',
+            ]
+            env = dict(os.environ)
+            env['GITHUB_TOKEN'] = token
+            try:
+                scan = subprocess.run(command, text=True, capture_output=True, timeout=600, env=env)
+                results[repo['name']] = check_trufflehog_result(scan.returncode, scan.stdout, repo)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                summary = 'TruffleHog scan timed out' if isinstance(exc, subprocess.TimeoutExpired) else 'TruffleHog could not start'
+                results[repo['name']] = check_secret_scan(0, error=summary)
         return results
 
     def scan(self, repo, secret_result):
@@ -513,8 +513,6 @@ class Scanner:
         }
         checks = entry['checks']
         checks['secret_scan'] = secret_result
-        if secret_result['status'] == ERROR:
-            entry['errors'].append(f'secret_scan: {secret_result["summary"]}')
 
         def run(key, func):
             try:
