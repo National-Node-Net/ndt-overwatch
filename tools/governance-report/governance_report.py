@@ -17,10 +17,10 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 DEPENDABOT = 'dependabot[bot]'
-EXCLUDED_REPOSITORIES = {'.github'}
+DEFAULT_EXCLUSIONS_FILE = Path(__file__).with_name('excluded-repositories.txt')
 TEMPLATE_FILES = [
     '.github/PULL_REQUEST_TEMPLATE.md',
     '.github/ISSUE_TEMPLATE/bug_report.md',
@@ -50,7 +50,7 @@ COLUMNS = [
     ('secret_scan', 'TruffleHog verified credential scan'),
     ('sbom', 'Release SBOM asset'),
     ('delete_branch', 'Automatic branch deletion'),
-    ('allow_auto_merge', 'Allow auto-merge setting'),
+    ('dependabot_auto_merge', 'Dependabot GitHub Actions auto-merge workflow'),
     ('activity', 'Recent repository activity'),
     ('workflows', 'OSPO workflow synchronization'),
     ('auto_backmerge', 'Main-to-develop back-merge'),
@@ -66,7 +66,7 @@ MATRIX_HEADERS = {
     'secret_scan': 'Verified credential<br>scan',
     'sbom': 'Release SBOM<br>asset',
     'delete_branch': 'Automatic branch<br>deletion',
-    'allow_auto_merge': 'Allow automatic<br>merge',
+    'dependabot_auto_merge': 'Dependabot GitHub Actions<br>auto-merge workflow',
     'activity': 'Recent repository<br>activity',
     'workflows': 'OSPO workflow<br>synchronization',
     'auto_backmerge': 'Main-to-develop<br>back-merge',
@@ -321,10 +321,25 @@ def check_delete_branch(value):
     return result(OK, 'on') if value else result(FAIL, 'off', ['delete_branch_on_merge is disabled.'])
 
 
-def check_allow_auto_merge(value):
-    if value is None:
-        return result(NA, 'unknown', ['Merge settings require a token with Contents: write.'])
-    return result(OK, 'enabled') if value else result(FAIL, 'disabled', ['allow_auto_merge is disabled.'])
+def check_dependabot_auto_merge(workflow_run, jobs):
+    steps = [step for job in jobs for step in job.get('steps', [])]
+    if any(step['name'] == 'Skip non-GitHub Actions updates' and step.get('conclusion') == 'success' for step in steps):
+        return None
+    number = workflow_run.get('run_number', workflow_run['id'])
+    date = workflow_run.get('created_at', '')[:10]
+    link = f'[run #{number}]({workflow_run["html_url"]})'
+    details = [f'Dependabot auto-merge workflow: {workflow_run["html_url"]}']
+    if workflow_run.get('status') != 'completed':
+        return result(WARN, f'{workflow_run.get("status", "pending")} {link} ({date})', details)
+    conclusion = workflow_run.get('conclusion')
+    failed_steps = [step['name'] for step in steps if step.get('conclusion') in ('failure', 'timed_out')]
+    if conclusion in ('failure', 'timed_out', 'startup_failure') or failed_steps:
+        details.extend(f'Failed step: {name}' for name in failed_steps)
+        return result(FAIL, f'failed {link} ({date})', details)
+    enable = next((step for step in steps if step['name'] == 'Enable auto-merge for the pull request'), None)
+    if conclusion == 'success' and enable and enable.get('conclusion') == 'success':
+        return result(OK, f'auto-merge enabled by {link} ({date})', details)
+    return result(WARN, f'{conclusion or "unknown"}; auto-merge not confirmed ({date})', details)
 
 
 def check_activity(activity, now, days):
@@ -612,7 +627,7 @@ class Scanner:
         run('dependabot_config', lambda: self.dependabot_config(full, default, paths, state['has_develop']))
         run('sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
         run('delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
-        run('allow_auto_merge', lambda: check_allow_auto_merge(self.repo_setting(full, state, 'allow_auto_merge')))
+        run('dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
         run('activity', lambda: check_activity(state['activity'], self.now, self.args.dormant_days))
         run('workflows', lambda: check_workflows(blobs, self.expected_workflows))
         run('auto_backmerge', lambda: self.auto_backmerge(full, paths))
@@ -656,6 +671,31 @@ class Scanner:
             raise
         return check_auto_backmerge(True, runs.get('workflow_runs', []))
 
+    def dependabot_auto_merge(self, full, paths):
+        workflow = 'auto-merge-dependabot-pull-requests.yml'
+        if f'.github/workflows/{workflow}' not in paths:
+            return result(FAIL, 'workflow missing from default branch', [f'Missing .github/workflows/{workflow}.'])
+        try:
+            page = 1
+            while True:
+                response = gh_api(f'repos/{full}/actions/workflows/{workflow}/runs?per_page=100&page={page}')
+                runs = response.get('workflow_runs', [])
+                for workflow_run in runs:
+                    if workflow_run.get('conclusion') == 'skipped':
+                        continue
+                    jobs = gh_api(f'repos/{full}/actions/runs/{workflow_run["id"]}/jobs?per_page=100')
+                    check = check_dependabot_auto_merge(workflow_run, jobs.get('jobs', []))
+                    if check is not None:
+                        return check
+                if len(runs) < 100:
+                    break
+                page += 1
+        except ApiError as exc:
+            if re.search(r'HTTP 403|HTTP 404|Resource not accessible by integration|Actions is disabled', str(exc), re.IGNORECASE):
+                return result(NA, 'Actions run history unavailable', ['The reader App needs Actions: read to inspect private workflow runs and job steps.'])
+            raise
+        return result(NA, 'no applicable runs recorded', ['Human PRs and non-GitHub-Actions update skips do not count as successful auto-merge attempts.'])
+
     def remind(self, full, prs, entry):
         notes = {}
         for pr in stale_human_prs(prs, self.now, self.args.human_pr_days):
@@ -688,7 +728,19 @@ def cell(text):
 
 
 def markdown_status(status):
-    return f'<span style="color:{STATUS_COLORS[status]}"><strong>{status}</strong></span>'
+    color = STATUS_COLORS[status].lstrip('#')
+    return f'![{status}](https://img.shields.io/badge/{quote(status, safe="")}-{color}?style=flat)'
+
+
+def repository_groups(repositories):
+    groups = [
+        ('Public repositories', [repo for repo in repositories if repo['visibility'] == 'public']),
+        ('Private and internal repositories', [repo for repo in repositories if repo['visibility'] in ('private', 'internal')]),
+    ]
+    unknown = [repo for repo in repositories if repo['visibility'] not in ('public', 'private', 'internal')]
+    if unknown:
+        groups.append(('Repositories with unknown visibility', unknown))
+    return groups
 
 
 def render_markdown(report):
@@ -722,19 +774,22 @@ def render_markdown(report):
         '## Repositories',
         '',
         'Each cell shows the full status and a short result. Expand a repository below for affected files, PRs, releases, and workflow details.',
-        '',
-        '| Repository | ' + ' | '.join(f'<small>{MATRIX_HEADERS[key]}</small>' for key, _ in COLUMNS) + ' |',
-        '| --- | ' + ' | '.join('---' for _ in COLUMNS) + ' |',
     ]
-    for repo in repos:
-        statuses = [
-            f'<small>{markdown_status(check["status"])}<br>{cell(check["summary"])}</small>'
-            for key, _ in COLUMNS
-            for check in [repo['checks'].get(key, result(NA, '-'))]
+    for title, group in repository_groups(repos):
+        lines += [
+            '', f'### {title} ({len(group)})', '',
+            '| Repository | ' + ' | '.join(MATRIX_HEADERS[key] for key, _ in COLUMNS) + ' |',
+            '| --- | ' + ' | '.join('---' for _ in COLUMNS) + ' |',
         ]
-        lines.append(
-            f'| [{cell(repo["name"])}]({repo["url"]}) | ' + ' | '.join(statuses) + ' |'
-        )
+        for repo in group:
+            statuses = [
+                f'{markdown_status(check["status"])}<br><sub><sup>{cell(check["summary"])}</sup></sub>'
+                for key, _ in COLUMNS
+                for check in [repo['checks'].get(key, result(NA, '-'))]
+            ]
+            lines.append(
+                f'| [{cell(repo["name"])}]({repo["url"]}) | ' + ' | '.join(statuses) + ' |'
+            )
 
     lines += ['', 'Status details are available in each repository section below.', '', '## Repository details', '']
     for repo in repos:
@@ -763,6 +818,9 @@ def render_markdown(report):
         f'- **Required governance files for private/internal repositories:** {private_required_files}.',
         '- **Pull request template:** `.github/PULL_REQUEST_TEMPLATE.md`.',
         '- **Issue templates:** `.github/ISSUE_TEMPLATE/bug_report.md` and `.github/ISSUE_TEMPLATE/feature_request.md`.',
+        '- **Dependabot GitHub Actions auto-merge workflow:** checks the latest applicable workflow run and job steps. '
+        'OK requires a successful auto-merge enablement step; FAIL means a failed attempt; WARN means running or unconfirmed. '
+        'Skipped human PRs and non-GitHub-Actions updates are ignored. Enabling auto-merge is not proof the PR has merged.',
         '- **Dependabot configuration:** `.github/dependabot.yml` or `.github/dependabot.yaml` on the default branch. '
         'Conftest evaluates the existing `github.dependabot` Rego policies: GitHub Actions entries omit `target-branch`; '
         'other ecosystems in `main` + `develop` GitFlow repos target `develop`; and enabled updates have a valid groups object '
@@ -773,7 +831,7 @@ def render_markdown(report):
         f'- **Activity:** exact whole days since the latest human-authored commit on `develop` (or default branch when no `develop` exists). '
         f'All bot-authored commits and any commit with `OSPO` anywhere in its subject or body are ignored. Dormant warning threshold: '
         f'>{args["dormant_days"]} days with no recent human work branch.',
-        '- **Credential scan:** TruffleHog scans selected active repositories (excluding `.github`) for verified credentials only. '
+        '- **Credential scan:** TruffleHog scans selected active repositories, excluding configured repositories, for verified credentials only. '
         'The report records counts/status only; it never stores credential values or finding locations.',
         '- **AI use:** none. The report script uses Python, GitHub CLI/API, Conftest and TruffleHog; it does not call an AI model.',
         '',
@@ -800,6 +858,7 @@ def render_html(report):
         'th,td{border:1px solid #d0d7de;padding:.35rem;vertical-align:top;overflow-wrap:anywhere}',
         '.matrix{table-layout:fixed}.matrix th,.matrix td{font-size:.72rem}.matrix th{font-weight:600}',
         '.status{font-weight:700}.ok{color:#1a7f37}.warn{color:#9a6700}.fail,.error{color:#cf222e}.n-a{color:#6e7781}',
+        '.result-summary{font-size:.75em;line-height:1.35}',
         '.cards{display:none}.card{border:1px solid #d0d7de;border-radius:.4rem;padding:.6rem;margin:.6rem 0}',
         '.check{margin:.2rem 0}.check-name{font-weight:600}',
         '@media(max-width:1100px){.matrix{display:none}.cards{display:block}}',
@@ -816,29 +875,32 @@ def render_html(report):
         counts = [sum(1 for repo in repos if repo['checks'].get(key, {}).get('status') == status) for status in STATUSES]
         rendered = '; '.join(f'{html_status(status)} {count}' for status, count in zip(STATUSES, counts) if count) or '-'
         parts.append(f'<tr><th>{esc(title)}</th><td>{rendered}</td></tr>')
-    parts.extend([
-        '</tbody></table>', '<h2>Repository matrix</h2>',
-        '<table class="matrix"><thead><tr><th>Repository</th>',
-    ])
-    parts.extend(f'<th>{header.replace("<br>", "<br>")}</th>' for key, _ in COLUMNS for header in [MATRIX_HEADERS[key]])
-    parts.append('</tr></thead><tbody>')
-    for repo in repos:
-        parts.append(f'<tr><th><a href="{esc(repo["url"])}">{esc(repo["name"])}</a></th>')
-        for key, _ in COLUMNS:
-            check = repo['checks'].get(key, result(NA, '-'))
-            parts.append(f'<td>{html_status(check["status"])}<br><small>{esc(check["summary"])}</small></td>')
-        parts.append('</tr>')
-    parts.extend(['</tbody></table>', '<section class="cards"><h2>Repositories</h2>'])
-    for repo in repos:
-        parts.append(f'<article class="card"><h3><a href="{esc(repo["url"])}">{esc(repo["name"])}</a></h3>')
-        for key, title in COLUMNS:
-            check = repo['checks'].get(key, result(NA, '-'))
-            parts.append(
-                f'<p class="check"><span class="check-name">{esc(title)}:</span> '
-                f'{html_status(check["status"])} — {esc(check["summary"])}</p>'
-            )
-        parts.append('</article>')
-    parts.extend(['</section>', '<h2>Repository details</h2>'])
+    parts.append('</tbody></table>')
+    for title, group in repository_groups(repos):
+        parts.extend([
+            f'<h2>{esc(title)} ({len(group)})</h2>',
+            '<table class="matrix"><thead><tr><th>Repository</th>',
+        ])
+        parts.extend(f'<th>{MATRIX_HEADERS[key]}</th>' for key, _ in COLUMNS)
+        parts.append('</tr></thead><tbody>')
+        for repo in group:
+            parts.append(f'<tr><th><a href="{esc(repo["url"])}">{esc(repo["name"])}</a></th>')
+            for key, _ in COLUMNS:
+                check = repo['checks'].get(key, result(NA, '-'))
+                parts.append(f'<td>{html_status(check["status"])}<br><span class="result-summary">{esc(check["summary"])}</span></td>')
+            parts.append('</tr>')
+        parts.extend(['</tbody></table>', '<section class="cards">'])
+        for repo in group:
+            parts.append(f'<article class="card"><h3><a href="{esc(repo["url"])}">{esc(repo["name"])}</a></h3>')
+            for key, check_title in COLUMNS:
+                check = repo['checks'].get(key, result(NA, '-'))
+                parts.append(
+                    f'<p class="check"><span class="check-name">{esc(check_title)}:</span> '
+                    f'{html_status(check["status"])}<br><span class="result-summary">{esc(check["summary"])}</span></p>'
+                )
+            parts.append('</article>')
+        parts.append('</section>')
+    parts.append('<h2>Repository details</h2>')
     for repo in repos:
         parts.append(f'<details><summary>{esc(repo["name"])} | {esc(repo["visibility"])} | default: {esc(repo["default_branch"])}</summary><ul>')
         details = [detail for key, _ in COLUMNS for detail in repo['checks'].get(key, {}).get('details', [])
@@ -856,18 +918,22 @@ def render_html(report):
     parts.extend(['</ul><p>Private/internal repositories:</p><ul>'])
     parts.extend(f'<li><code>{esc(path)}</code></li>' for path in legend.get('private_required_files', []))
     parts.extend([
-        '</ul><h3>Templates and policy</h3>',
-        '<p>PR template: <code>.github/PULL_REQUEST_TEMPLATE.md</code>. Issue templates: '
-        '<code>.github/ISSUE_TEMPLATE/bug_report.md</code> and '
-        '<code>.github/ISSUE_TEMPLATE/feature_request.md</code>.</p>',
-        '<p>Dependabot config checks <code>.github/dependabot.yml</code> or <code>.github/dependabot.yaml</code> '
-        'with the existing GitFlow target-branch and Dependabot groups Rego rules; it is not full YAML schema validation.</p>',
-        f'<p>Dependabot PR: WARN &gt;{args["dependabot_pr_days"]}d, FAIL &gt;{VERY_OLD_DEPENDABOT_DAYS}d. '
-        f'Human PR: WARN/reminder &gt;{args["human_pr_days"]}d; no separate FAIL age threshold is configured. '
-        f'Activity: exact whole days since latest human commit; dormant warning after {args["dormant_days"]}d.</p>',
-        '<p>TruffleHog scans verified credentials only; values and locations are not recorded. '
-        'Human-activity age ignores all bot-authored commits and any commit with OSPO in its subject or body. No AI/LLM is used.</p>',
-        '<p>The font is inherited from the viewer; no font family is set in this report.</p>',
+        '</ul><h3>Templates and policy</h3><ul>',
+        '<li><strong>PR template:</strong> <code>.github/PULL_REQUEST_TEMPLATE.md</code>.</li>',
+        '<li><strong>Bug report template:</strong> <code>.github/ISSUE_TEMPLATE/bug_report.md</code>.</li>',
+        '<li><strong>Feature request template:</strong> <code>.github/ISSUE_TEMPLATE/feature_request.md</code>.</li>',
+        '<li><strong>Dependabot configuration:</strong> checks <code>.github/dependabot.yml</code> or <code>.github/dependabot.yaml</code> '
+        'with the existing GitFlow target-branch and Dependabot groups Rego rules; it is not full YAML schema validation.</li>',
+        f'<li><strong>Dependabot PR age:</strong> WARN &gt;{args["dependabot_pr_days"]}d, FAIL &gt;{VERY_OLD_DEPENDABOT_DAYS}d.</li>',
+        f'<li><strong>Human PR age:</strong> WARN/reminder &gt;{args["human_pr_days"]}d; no separate FAIL age threshold is configured.</li>',
+        f'<li><strong>Repository activity:</strong> exact whole days since latest human commit; dormant warning after {args["dormant_days"]}d.</li>',
+        '<li><strong>Activity exclusions:</strong> ignores all bot-authored commits and any commit with OSPO in its subject or body.</li>',
+        '<li><strong>Credential scan:</strong> TruffleHog scans verified credentials only; values and locations are not recorded.</li>',
+        '<li><strong>Dependabot GitHub Actions auto-merge workflow:</strong> checks the latest applicable run and job steps. '
+        'OK requires successful auto-merge enablement; FAIL means a failed attempt; WARN means running or unconfirmed. '
+        'Human PRs and non-GitHub-Actions update skips are ignored. This does not prove the PR has merged.</li>',
+        '<li><strong>AI use:</strong> no AI/LLM is used.</li>',
+        '</ul>',
         '</body></html>',
     ])
     return '\n'.join(parts)
@@ -880,14 +946,35 @@ def bounded_int(value):
     return number
 
 
-def partition_repositories(repositories):
-    excluded = sorted(repo['name'] for repo in repositories if repo['name'] in EXCLUDED_REPOSITORIES)
+def parse_exclusions(value, org):
+    names = set()
+    for name in re.split(r'[,\s]+', value.strip()):
+        if not name:
+            continue
+        if '/' in name:
+            owner, name = name.split('/', 1)
+            if owner.casefold() != org.casefold():
+                raise ValueError('Excluded repositories must belong to the scanned organisation')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+            raise ValueError('Excluded repositories must be repository names, not patterns or URLs')
+        names.add(name.casefold())
+    return names
+
+
+def load_exclusions(path, org):
+    return parse_exclusions('\n'.join(read_list_file(path.read_text(encoding='utf-8'))), org)
+
+
+def partition_repositories(repositories, exclude_names=()):
+    excluded_names = {name.casefold() for name in exclude_names}
+    excluded = sorted(repo['name'] for repo in repositories if repo['name'].casefold() in excluded_names)
     active = sorted(
         (repo for repo in repositories if not repo.get('archived') and not repo.get('disabled')
-         and repo['name'] not in EXCLUDED_REPOSITORIES),
+         and repo['name'].casefold() not in excluded_names),
         key=lambda repo: repo['name'].lower(),
     )
-    skipped = sorted(repo['name'] for repo in repositories if repo.get('archived') or repo.get('disabled'))
+    skipped = sorted(repo['name'] for repo in repositories
+                     if (repo.get('archived') or repo.get('disabled')) and repo['name'].casefold() not in excluded_names)
     return active, skipped, excluded
 
 
@@ -906,11 +993,18 @@ def parse_args(argv):
     parser.add_argument('--inner-source-checklist-repo', help='Defaults to ORG/private-ospo-resources.')
     parser.add_argument('--output-dir', default='governance-report')
     parser.add_argument('--repo', action='append', help='Limit to these repository names (repeatable).')
+    parser.add_argument('--exclusions-file', type=Path, default=DEFAULT_EXCLUSIONS_FILE,
+                        help='Repository exclusion list file (one name per line; # comment lines allowed).')
+    parser.add_argument('--exclude-repos', default='', help='Additional repository names to exclude, separated by commas or whitespace.')
     args = parser.parse_args(argv)
     if not args.org or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*', args.org):
         parser.error('--org is required and must be a valid organisation name')
     if args.post_reminders and not args.reminder_author:
         parser.error('--post-reminders requires --reminder-author')
+    try:
+        args.exclude_repos = load_exclusions(args.exclusions_file.expanduser(), args.org) | parse_exclusions(args.exclude_repos, args.org)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     args.inner_source_checklist_repo = args.inner_source_checklist_repo or f'{args.org}/private-ospo-resources'
     return args
 
@@ -927,7 +1021,7 @@ def main(argv=None):
     all_repos = gh_api(f'orgs/{args.org}/repos?type=all&per_page=100', paginate=True)
     if args.repo:
         all_repos = [r for r in all_repos if r['name'] in args.repo]
-    active, skipped, excluded = partition_repositories(all_repos)
+    active, skipped, excluded = partition_repositories(all_repos, args.exclude_repos)
 
     print('Running verified-only TruffleHog scan (credential output is suppressed).', file=sys.stderr)
     secret_results = scanner.secret_scan(active)

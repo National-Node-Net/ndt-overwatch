@@ -13,6 +13,10 @@ on:
     - cron: '17 7 * * 1'
   workflow_dispatch:
     inputs:
+      excluded_repos:
+        description: Repository names to exclude (commas or spaces); defaults to GOVERNANCE_EXCLUDED_REPOS variable
+        type: string
+        required: false
       human_pr_days:
         description: Days a human PR can stay open before it is reported
         type: number
@@ -104,6 +108,7 @@ jobs:
           DEPENDABOT_PR_DAYS: ${{ github.event.inputs.dependabot_pr_days || '14' }}
           DORMANT_DAYS: ${{ github.event.inputs.dormant_days || '180' }}
           RELEASE_DAYS: ${{ github.event.inputs.release_days || '90' }}
+          EXCLUDED_REPOS: ${{ github.event.inputs.excluded_repos || vars.GOVERNANCE_EXCLUDED_REPOS || '' }}
         run: |
           set -euo pipefail
           args=(
@@ -111,6 +116,7 @@ jobs:
             --dependabot-pr-days "$DEPENDABOT_PR_DAYS"
             --dormant-days "$DORMANT_DAYS"
             --release-days "$RELEASE_DAYS"
+            --exclude-repos "$EXCLUDED_REPOS"
             --output-dir governance-report
           )
           if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then

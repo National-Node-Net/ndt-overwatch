@@ -2,6 +2,8 @@
 # © Crown Copyright 2026. This work has been developed by the National Digital Twin Programme and is legally attributed to the UK's Department for Business, Innovation, Science and Trade (BIST) as the governing entity.
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -206,20 +208,135 @@ class OtherCheckTests(unittest.TestCase):
         self.assertEqual(gr.check_delete_branch(False)['status'], gr.FAIL)
         self.assertEqual(gr.check_delete_branch(True)['status'], gr.OK)
 
-    def test_allow_auto_merge(self):
-        self.assertEqual(gr.check_allow_auto_merge(None)['status'], gr.NA)
-        self.assertEqual(gr.check_allow_auto_merge(False)['status'], gr.FAIL)
-        self.assertEqual(gr.check_allow_auto_merge(True)['status'], gr.OK)
+    def test_dependabot_auto_merge_outcomes(self):
+        run = {'id': 12, 'run_number': 4, 'html_url': 'https://example.invalid/run/12',
+               'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success'}
+        enabled = [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'success'}]}]
+        self.assertEqual(gr.check_dependabot_auto_merge(run, enabled)['status'], gr.OK)
+        disabled = [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'skipped'}]}]
+        self.assertEqual(gr.check_dependabot_auto_merge(run, disabled)['status'], gr.WARN)
+        failed = [{ 'steps': [{'name': 'Fetch GitHub App token for target repo', 'conclusion': 'failure'}]}]
+        check = gr.check_dependabot_auto_merge({**run, 'conclusion': 'failure'}, failed)
+        self.assertEqual(check['status'], gr.FAIL)
+        self.assertIn('Fetch GitHub App token', str(check['details']))
+        self.assertEqual(gr.check_dependabot_auto_merge({**run, 'status': 'in_progress', 'conclusion': None}, [])['status'], gr.WARN)
+        non_actions = [{'steps': [{'name': 'Skip non-GitHub Actions updates', 'conclusion': 'success'}]}]
+        self.assertIsNone(gr.check_dependabot_auto_merge(run, non_actions))
+
+    def test_dependabot_auto_merge_missing_and_inaccessible(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        self.assertEqual(scanner.dependabot_auto_merge('Org/repo', set())['status'], gr.FAIL)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('HTTP 403')):
+            self.assertEqual(scanner.dependabot_auto_merge('Org/repo', paths)['status'], gr.NA)
+
+    def test_dependabot_auto_merge_ignores_skipped_runs(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        runs = [
+            {'id': 3, 'conclusion': 'skipped'},
+            {'id': 2, 'conclusion': 'success', 'status': 'completed', 'html_url': 'https://example.invalid/run/2'},
+            {'id': 1, 'conclusion': 'success', 'status': 'completed', 'html_url': 'https://example.invalid/run/1'},
+        ]
+        responses = [
+            {'workflow_runs': runs},
+            {'jobs': [{'steps': [{'name': 'Skip non-GitHub Actions updates', 'conclusion': 'success'}]}]},
+            {'jobs': [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'success'}]}]},
+        ]
+        with patch.object(gr, 'gh_api', side_effect=responses) as api:
+            self.assertEqual(scanner.dependabot_auto_merge('Org/repo', paths)['status'], gr.OK)
+        self.assertEqual(api.call_count, 3)
+
+    def test_dependabot_auto_merge_no_applicable_runs(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        with patch.object(gr, 'gh_api', return_value={'workflow_runs': [{'conclusion': 'skipped'}]}):
+            self.assertEqual(scanner.dependabot_auto_merge('Org/repo', paths)['status'], gr.NA)
 
     def test_github_dot_repo_is_excluded(self):
         repos = [
-            {'name': '.github'}, {'name': 'active'},
+            {'name': '.github'}, {'name': 'opa-pov'}, {'name': 'active'},
             {'name': 'archived', 'archived': True}, {'name': 'disabled', 'disabled': True},
         ]
-        active, skipped, excluded = gr.partition_repositories(repos)
+        names = gr.load_exclusions(gr.DEFAULT_EXCLUSIONS_FILE, 'org')
+        active, skipped, excluded = gr.partition_repositories(repos, names)
         self.assertEqual([repo['name'] for repo in active], ['active'])
         self.assertEqual(skipped, ['archived', 'disabled'])
-        self.assertEqual(excluded, ['.github'])
+        self.assertEqual(excluded, ['.github', 'opa-pov'])
+
+    def test_configurable_exclusions_before_scan_and_totals(self):
+        names = gr.parse_args(['--org', 'org', '--exclude-repos', 'Repo-A, Org/repo-b\nrepo-c']).exclude_repos
+        repos = [{'name': name} for name in ('.github', 'repo-a', 'repo-b', 'repo-c', 'keep')]
+        active, skipped, excluded = gr.partition_repositories(repos, names)
+        self.assertEqual([repo['name'] for repo in active], ['keep'])
+        self.assertEqual(excluded, ['.github', 'repo-a', 'repo-b', 'repo-c'])
+        self.assertEqual(skipped, [])
+        self.assertEqual(gr.parse_args(['--org', 'org', '--exclude-repos', 'a,b']).exclude_repos, {'.github', 'opa-pov', 'a', 'b'})
+
+    def test_exclusion_file_comments_case_and_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'excluded.txt'
+            path.write_text('# Exclusions\n\n  Repo-A\norg/REPO-B\nrepo-a\n', encoding='utf-8')
+            self.assertEqual(gr.load_exclusions(path, 'Org'), {'repo-a', 'repo-b'})
+
+    def test_custom_exclusion_file_combines_with_runtime_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'excluded.txt'
+            path.write_text('repo-a\n', encoding='utf-8')
+            args = gr.parse_args(['--org', 'org', '--exclusions-file', str(path), '--exclude-repos', 'repo-b'])
+            self.assertEqual(args.exclude_repos, {'repo-a', 'repo-b'})
+
+    def test_empty_file_has_no_hardcoded_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'excluded.txt'
+            path.write_text('# No exclusions\n', encoding='utf-8')
+            self.assertEqual(gr.load_exclusions(path, 'Org'), set())
+            active, _, excluded = gr.partition_repositories([{'name': 'opa-pov'}], gr.load_exclusions(path, 'Org'))
+            self.assertEqual([repo['name'] for repo in active], ['opa-pov'])
+            self.assertEqual(excluded, [])
+
+    def test_missing_exclusion_file_aborts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'missing.txt'
+            with patch('sys.stderr'), self.assertRaises(SystemExit) as error:
+                gr.parse_args(['--org', 'org', '--exclusions-file', str(path)])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_invalid_exclusion_names_rejected(self):
+        for value in ('other/repo', 'https://github.com/org/repo', 'repo*'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                gr.parse_exclusions(value, 'org')
+
+    def test_group_tables_keep_visibility_separate(self):
+        repos = [
+            {'name': 'public-repo', 'visibility': 'public'},
+            {'name': 'private-repo', 'visibility': 'private'},
+            {'name': 'internal-repo', 'visibility': 'internal'},
+        ]
+        groups = gr.repository_groups(repos)
+        self.assertEqual([repo['name'] for repo in groups[0][1]], ['public-repo'])
+        self.assertEqual([repo['name'] for repo in groups[1][1]], ['private-repo', 'internal-repo'])
+        report = {
+            'organisation': 'org', 'generated_at': 'now', 'mode': 'report only', 'skipped': [],
+            'parameters': {'human_pr_days': 30, 'dependabot_pr_days': 14, 'dormant_days': 180, 'release_days': 90},
+            'repositories': [{**repo, 'url': 'https://example.invalid/' + repo['name'],
+                              'default_branch': 'main', 'errors': [], 'checks': {}} for repo in repos],
+        }
+        for renderer in (gr.render_markdown, gr.render_html):
+            output = renderer(report)
+            public_section = output.split('Public repositories (1)', 1)[1].split('Private and internal repositories (2)', 1)[0]
+            self.assertIn('public-repo', public_section)
+            self.assertNotIn('private-repo', public_section)
+            self.assertNotIn('internal-repo', public_section)
+
+    def test_status_badges_are_colored_without_inline_css(self):
+        for status, color in gr.STATUS_COLORS.items():
+            with self.subTest(status=status):
+                badge = gr.markdown_status(status)
+                self.assertIn(color.lstrip('#'), badge)
+                self.assertIn('![' + status + ']', badge)
+                self.assertNotIn('style="', badge)
+                self.assertNotIn('<span', badge)
 
     def test_trufflehog_output_counts_without_retaining_credentials(self):
         repos = [{'name': 'repo-a', 'full_name': 'Org/repo-a'}]
@@ -298,8 +415,10 @@ class OtherCheckTests(unittest.TestCase):
             }],
         }
         markdown = gr.render_markdown(report)
-        self.assertIn('| Repository | <small>Develop<br>branch</small> |', markdown)
-        self.assertIn('<small><span style="color:#cf222e"><strong>FAIL</strong></span><br>a\\|b</small>', markdown)
+        self.assertIn('| Repository | Develop<br>branch |', markdown)
+        self.assertIn(gr.markdown_status(gr.FAIL) + '<br><sub><sup>a\\|b</sup></sub>', markdown)
+        self.assertIn('### Public repositories (1)', markdown)
+        self.assertIn('### Private and internal repositories (0)', markdown)
         self.assertIn('Each cell shows the full status and a short result.', markdown)
         self.assertIn('Missing file: a\\|b', markdown)
         self.assertIn('Human PR age', markdown)
@@ -311,7 +430,14 @@ class OtherCheckTests(unittest.TestCase):
         dashboard_html = gr.render_html(report)
         self.assertIn('.warn{color:#9a6700}', dashboard_html)
         self.assertIn('<span class="status fail">FAIL</span>', dashboard_html)
+        self.assertIn('.result-summary{font-size:.75em', dashboard_html)
         self.assertNotIn('font-family', dashboard_html)
+        self.assertNotIn('The font is inherited from the viewer', dashboard_html)
+        self.assertIn('Dependabot GitHub Actions<br>auto-merge workflow', dashboard_html)
+        self.assertNotIn('Repository auto-merge enabled', dashboard_html)
+        legend = dashboard_html.split('<h3>Templates and policy</h3>', 1)[1].split('</ul>', 1)[0]
+        self.assertEqual(legend.count('<li>'), 11)
+        self.assertNotIn('<p>', legend)
 
 
 if __name__ == '__main__':

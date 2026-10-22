@@ -1,13 +1,32 @@
 # OSPO governance report
 
-Scans every active (non-archived) repository in the organisation except the organisation-level `.github` repository.
-The dashboard includes a summary, a repository-by-check matrix, and detailed findings for each repository.
+Scans active (non-archived) repositories except those listed in `excluded-repositories.txt` and any additional runtime exclusions.
+The dashboard includes a summary, separate public and private/internal repository-by-check matrices,
+and detailed findings for each repository.
 
 The [workflow](../../.github/workflows/governance-report.yml) runs on pushes to `feature/governance-report` for pre-merge testing, weekly (Monday 07:17 UTC), and on demand.
 It checks out `National-Node-Net/ospo-resources` `develop` to use the centrally maintained file lists, workflow manifest and Dependabot policies.
 The Markdown dashboard is shown in the run's job summary. The artifact includes `dashboard.md`,
 `dashboard.html` and `report.json` (kept for 90 days). The HTML dashboard has colored status text and
 a responsive matrix; it inherits the browser font and does not set a font family.
+GitHub job summaries strip inline CSS, so Markdown uses static Shields.io status badges:
+green OK, amber WARN, red FAIL/ERROR, grey N/A. Badge requests contain only fixed status labels and colors,
+not repository names or results. Result descriptions use nested sub/sup markup for two relative size reductions;
+the HTML equivalent uses 75% text. GitHub controls the final Markdown typography, not arbitrary pixel sizes.
+
+## Repository exclusions
+
+- Edit [`excluded-repositories.txt`](excluded-repositories.txt) to maintain exclusions without changing Python.
+	It currently lists `.github` and `opa-pov`, one repository per line. Blank lines and `#` comment lines are ignored.
+- Local runs may select another list with `--exclusions-file /path/to/list.txt`. An unreadable or invalid file stops the scan.
+- For scheduled and push runs, set repository Actions variable `GOVERNANCE_EXCLUDED_REPOS` to a
+	comma- or whitespace-separated list such as `repo-one, repo-two`.
+- Manual runs have an optional `excluded_repos` input, which overrides that variable when nonempty.
+	Runtime exclusions are added to the file's list; they do not replace it.
+- Local runs accept `--exclude-repos "repo-one, repo-two"`. Names are case-insensitive; `Org/repo` is also
+	accepted when it belongs to the scanned organisation. URLs and wildcard patterns are rejected.
+- Exclusions apply before credential scans, checks, reminders, and summary totals. Excluded repositories
+	are listed separately for auditability; their findings are not reported.
 
 ## Checks
 
@@ -22,7 +41,7 @@ a responsive matrix; it inherits the browser font and does not set a font family
 | Credential scan | Pinned TruffleHog scan of explicitly selected active repositories, verified results only | FAIL if verified findings; values and locations are never stored |
 | Release SBOM | Releases published in the window (default 90 days, otherwise the latest release) have an `*.spdx.json` or `*sbom*` asset | FAIL if missing |
 | Auto-delete branches | `delete_branch_on_merge` | FAIL if off, N/A if the token cannot see it |
-| Allow auto-merge | `allow_auto_merge` repository setting | FAIL if off |
+| Dependabot GitHub Actions auto-merge workflow | Latest applicable `auto-merge-dependabot-pull-requests.yml` run and its job steps; ignores human PR skips and non-GitHub-Actions update skips | OK only if the auto-merge enablement step succeeded; FAIL if missing/failed; WARN if running or unconfirmed; N/A if no applicable run or inaccessible history |
 | Activity | Exact days since the latest human-authored commit to `develop` (or the default branch); excludes all bot-authored commits and any commit with `OSPO` anywhere in its subject or body | WARN if over 180 days and no active human work branch |
 | OSPO workflows | Workflows listed in `organisation-required-workflows.txt` exist on each repository's default branch and match this checkout byte for byte | FAIL if missing, WARN if out of sync |
 | Main-to-develop back-merge | Latest actual run of `.github/workflows/auto-back-merge.yml`; skipped runs from closed, unmerged PRs are ignored | OK if passed, FAIL if failed, WARN if running/other conclusion, N/A if no run or Actions history is not visible |
@@ -49,7 +68,8 @@ again within six days of the last reminder from the same app (hidden marker
 The apps must be installed on the target repositories; repositories the reader app cannot see are not reported.
 GitHub requires Contents: write to expose merge-related settings, even for GET requests.
 The writer token is used only by the cached repository-settings GET; no settings are changed.
-The merge-back check similarly shows N/A until the repository-reader App has Actions: read; its current installation does not have that permission.
+The merge-back and Dependabot auto-merge workflow checks need Actions: read for private run history and job steps.
+Successful enablement means GitHub accepted an auto-merge request; it does not prove the PR has already merged.
 
 Actions must be enabled in `ndt-overwatch` for the workflow to run. The repository-reader App's credentials must be available as organisation Actions secrets and the App must be installed with access to the repositories being scanned and `ospo-resources`.
 The TruffleHog scan needs Git, Docker and a token that can read every selected repository.
