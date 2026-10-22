@@ -4,6 +4,7 @@
 """Scan every active repository in a GitHub organisation and write an OSPO governance dashboard."""
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -199,7 +200,7 @@ def check_dependabot_config(config_path, failures, evaluated=True):
     return result(OK, 'policy passed')
 
 
-def parse_trufflehog_output(output, repositories):
+def parse_trufflehog_output(output, repositories, *, local_repository=False):
     names = {repo['full_name'].lower(): repo['name'] for repo in repositories}
     counts = {repo['name']: 0 for repo in repositories}
     unmapped = 0
@@ -209,13 +210,17 @@ def parse_trufflehog_output(output, repositories):
         try:
             finding = json.loads(line)
         except json.JSONDecodeError:
-            continue
+            raise ValueError('Malformed scanner JSON') from None
+        if not isinstance(finding, dict):
+            raise ValueError('Malformed scanner result')
         if finding.get('Verified') is not True:
             continue
         git = (((finding.get('SourceMetadata') or {}).get('Data') or {}).get('Git') or {})
         repository_url = git.get('repository') or ''
         path = urlparse(repository_url).path.strip('/').removesuffix('.git').lower()
         repo_name = names.get(path)
+        if local_repository and len(repositories) == 1 and repository_url.startswith('file://'):
+            repo_name = repositories[0]['name']
         if repo_name:
             counts[repo_name] += 1
         else:
@@ -235,10 +240,13 @@ def check_secret_scan(count, *, available=True, error=None, reason=None):
     return result(OK, 'no verified credentials found')
 
 
-def check_trufflehog_result(exit_code, output, repo):
-    counts, unmapped = parse_trufflehog_output(output, [repo])
+def check_trufflehog_result(exit_code, output, repo, *, local_repository=False):
     if exit_code != 0:
         return check_secret_scan(0, error=f'TruffleHog exited with code {exit_code}')
+    try:
+        counts, unmapped = parse_trufflehog_output(output, [repo], local_repository=local_repository)
+    except ValueError:
+        return check_secret_scan(0, error='TruffleHog returned malformed JSON')
     if unmapped:
         return check_secret_scan(0, error=f'{unmapped} verified finding(s) could not be attributed')
     return check_secret_scan(counts[repo['name']])
@@ -309,13 +317,13 @@ def check_sbom(releases, now, days):
 
 def check_delete_branch(value):
     if value is None:
-        return result(NA, 'unknown', ['Setting not visible to this token (needs Administration: read).'])
+        return result(NA, 'unknown', ['Merge settings require a token with Contents: write.'])
     return result(OK, 'on') if value else result(FAIL, 'off', ['delete_branch_on_merge is disabled.'])
 
 
 def check_allow_auto_merge(value):
     if value is None:
-        return result(NA, 'unknown', ['Setting not visible to this token.'])
+        return result(NA, 'unknown', ['Merge settings require a token with Contents: write.'])
     return result(OK, 'enabled') if value else result(FAIL, 'disabled', ['allow_auto_merge is disabled.'])
 
 
@@ -418,6 +426,7 @@ class Scanner:
         self.org = args.org
         self.now = datetime.now(timezone.utc)
         self.pr_token = os.environ.get('PR_TOKEN') or None
+        self.settings_token = os.environ.get('SETTINGS_TOKEN') or None
         self.oss_files = read_list_file((source_root / 'oss-checklist-files.txt').read_text())
         manifest = read_list_file((source_root / 'organisation-required-workflows.txt').read_text())
         self.expected_workflows = {
@@ -488,20 +497,51 @@ class Scanner:
 
         results = {}
         for repo in repos:
-            command = [
-                'docker', 'run', '--rm', '-e', 'GITHUB_TOKEN', TRUFFLEHOG_IMAGE,
-                'github', f'--repo=https://github.com/{repo["full_name"]}',
-                '--results=verified', '--json', '--no-update', '--no-color',
-            ]
-            env = dict(os.environ)
-            env['GITHUB_TOKEN'] = token
-            try:
-                scan = subprocess.run(command, text=True, capture_output=True, timeout=600, env=env)
-                results[repo['name']] = check_trufflehog_result(scan.returncode, scan.stdout, repo)
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                summary = 'TruffleHog scan timed out' if isinstance(exc, subprocess.TimeoutExpired) else 'TruffleHog could not start'
-                results[repo['name']] = check_secret_scan(0, error=summary)
+            print(f'Scanning Git history for credentials: {repo["full_name"]}', file=sys.stderr)
+            results[repo['name']] = self.scan_git_history(repo, token)
         return results
+
+    def scan_git_history(self, repo, token):
+        with tempfile.TemporaryDirectory(prefix='ospo-scan-') as tmp:
+            env = dict(os.environ)
+            auth = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+            env.update({
+                'GIT_CONFIG_COUNT': '2',
+                'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                'GIT_CONFIG_VALUE_0': f'AUTHORIZATION: basic {auth}',
+                'GIT_CONFIG_KEY_1': 'credential.helper',
+                'GIT_CONFIG_VALUE_1': '',
+                'GIT_TERMINAL_PROMPT': '0',
+            })
+            container_name = Path(tmp).name
+            try:
+                clone = subprocess.run(
+                    ['git', 'clone', '--no-checkout', f'https://github.com/{repo["full_name"]}.git',
+                     str(Path(tmp) / 'repository')],
+                    env=env, text=True, capture_output=True, timeout=300,
+                )
+                if clone.returncode != 0:
+                    return check_secret_scan(0, error=f'Git history clone failed (exit {clone.returncode})')
+                index = subprocess.run(
+                    ['git', '-C', str(Path(tmp) / 'repository'), 'read-tree', 'HEAD'],
+                    text=True, capture_output=True, timeout=30,
+                )
+                if index.returncode != 0:
+                    return check_secret_scan(0, error='Git history index could not be prepared')
+                # Only the clone receives authentication; scanner containers receive no GitHub token.
+                command = [
+                    'docker', 'run', '--rm', '--name', container_name,
+                    '--mount', f'type=bind,source={tmp},target=/scan,readonly', TRUFFLEHOG_IMAGE,
+                    'git', 'file:///scan/repository', '--results=verified', '--json',
+                    '--no-update', '--no-color', '--fail-on-scan-errors',
+                ]
+                scan = subprocess.run(command, text=True, capture_output=True, timeout=600)
+                return check_trufflehog_result(scan.returncode, scan.stdout, repo, local_repository=True)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                summary = 'Credential scan timed out' if isinstance(exc, subprocess.TimeoutExpired) else 'Credential scan could not start'
+                return check_secret_scan(0, error=summary)
+            finally:
+                subprocess.run(['docker', 'rm', '-f', container_name], capture_output=True, timeout=30)
 
     def scan(self, repo, secret_result):
         name = repo['name']
@@ -513,6 +553,8 @@ class Scanner:
         }
         checks = entry['checks']
         checks['secret_scan'] = secret_result
+        if secret_result['status'] in (ERROR, NA):
+            entry['errors'].append(f'secret_scan: {secret_result["summary"]}')
 
         def run(key, func):
             try:
@@ -596,7 +638,7 @@ class Scanner:
 
     def repo_setting(self, full, state, setting):
         if 'settings' not in state:
-            state['settings'] = gh_api(f'repos/{full}')
+            state['settings'] = gh_api(f'repos/{full}', token=self.settings_token)
         return state['settings'].get(setting)
 
     def auto_backmerge(self, full, paths):

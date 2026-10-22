@@ -44,17 +44,24 @@ again within six days of the last reminder from the same app (hidden marker
 | --- | --- | --- |
 | `NODE_NET_REPOSITORY_READER_APP_PRIVATE_KEY` | Repository list, files, releases, branches, commits and Actions runs; App ID is public metadata pinned in the workflow | Contents: read, Metadata: read, Actions: read |
 | `NODE_NET_PULL_REQUEST_CONTROLLER_APP_PRIVATE_KEY` | Listing PRs and posting reminders; App ID is public metadata pinned in the workflow | Pull requests: write |
+| `NODE_NET_REPOSITORY_WRITER_APP_PRIVATE_KEY` | GET repository settings only, via `SETTINGS_TOKEN`; token requests Contents only, no Workflows write | Contents: write |
 
-Both apps must be installed on all repositories; repositories the reader app cannot see are not reported.
-`delete_branch_on_merge` is only returned with Administration: read, which the reader app does not have,
-so that column shows N/A until that permission is granted.
+The apps must be installed on the target repositories; repositories the reader app cannot see are not reported.
+GitHub requires Contents: write to expose merge-related settings, even for GET requests.
+The writer token is used only by the cached repository-settings GET; no settings are changed.
 The merge-back check similarly shows N/A until the repository-reader App has Actions: read; its current installation does not have that permission.
 
 Actions must be enabled in `ndt-overwatch` for the workflow to run. The repository-reader App's credentials must be available as organisation Actions secrets and the App must be installed with access to the repositories being scanned and `ospo-resources`.
-The TruffleHog scan needs Docker and a token that can read every selected repository. Repositories are passed as explicit URLs rather than enumerated through the organization API, and are scanned separately so a failure is isolated to that repository. Its output is captured,
-parsed for verified finding counts, and never written to logs or artifacts. In local usage it can read
-`GH_TOKEN`/`GITHUB_TOKEN` or use `gh auth token`; TruffleHog's GitHub source documents classic PAT support.
-The merge-back check shows N/A unless the reader App is granted Actions: read. The branch-setting checks need Administration: read to expose `delete_branch_on_merge`.
+The TruffleHog scan needs Git, Docker and a token that can read every selected repository.
+Git clones each repository with full history and no checkout into a temporary directory using the reader token, supplied only through
+process environment configuration (never URL arguments or persisted Git config). TruffleHog scans the clone
+using its `git` source rather than its user-token-based `github` source. The scanner container receives a
+read-only mount and no GitHub token. Temporary clones and containers are removed after each scan.
+Output is parsed for verified finding counts and never written to logs or artifacts. Malformed output,
+clone failures, unavailable prerequisites and scanner errors fail the job after saving the report; findings
+remain FAIL results rather than processing errors. A green job must not hide incomplete credential scans.
+Locally, authentication can use `GH_TOKEN`/`GITHUB_TOKEN`, `gh auth token`, or the Git credential helper.
+The merge-back check shows N/A unless the reader App is granted Actions: read.
 
 ### Manual runs from a branch
 

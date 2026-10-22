@@ -2,6 +2,8 @@
 # © Crown Copyright 2026. This work has been developed by the National Digital Twin Programme and is legally attributed to the UK's Department for Business, Innovation, Science and Trade (BIST) as the governing entity.
 
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import governance_report as gr
@@ -149,6 +151,56 @@ class ActivityTests(unittest.TestCase):
 
 
 class OtherCheckTests(unittest.TestCase):
+    def test_local_history_scan_uses_reader_token_for_clone_only(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        repo = {'name': 'repo-a', 'full_name': 'Org/repo-a'}
+        calls = []
+
+        def execute(command, **kwargs):
+            calls.append((command, kwargs))
+            return SimpleNamespace(returncode=0, stdout='')
+
+        with patch.object(gr.subprocess, 'run', side_effect=execute):
+            check = scanner.scan_git_history(repo, 'test-reader-token')
+        self.assertEqual(check['status'], gr.OK)
+        clone, clone_options = calls[0]
+        self.assertEqual(clone[:3], ['git', 'clone', '--no-checkout'])
+        self.assertNotIn('test-reader-token', str(clone))
+        self.assertIn('AUTHORIZATION: basic ', clone_options['env']['GIT_CONFIG_VALUE_0'])
+        self.assertEqual(calls[1][0][-2:], ['read-tree', 'HEAD'])
+        scan, scan_options = calls[2]
+        self.assertIn('file:///scan/repository', scan)
+        self.assertIn('--fail-on-scan-errors', scan)
+        self.assertIn('readonly', ' '.join(scan))
+        self.assertNotIn('env', scan_options)
+        self.assertNotIn('-e', scan)
+        self.assertEqual(calls[3][0][:3], ['docker', 'rm', '-f'])
+
+    def test_clone_failure_does_not_run_scanner(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        repo = {'name': 'repo-a', 'full_name': 'Org/repo-a'}
+        with patch.object(gr.subprocess, 'run', return_value=SimpleNamespace(returncode=128, stdout='')) as execute:
+            check = scanner.scan_git_history(repo, 'test-reader-token')
+        self.assertEqual(check['status'], gr.ERROR)
+        self.assertIn('clone failed', check['summary'])
+        self.assertEqual(execute.call_count, 2)
+
+    def test_settings_get_uses_writer_token_and_cache(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        scanner.settings_token = 'test-writer-token'
+        state = {}
+        with patch.object(gr, 'gh_api', return_value={'delete_branch_on_merge': False, 'allow_auto_merge': True}) as api:
+            self.assertFalse(scanner.repo_setting('Org/repo-a', state, 'delete_branch_on_merge'))
+            self.assertTrue(scanner.repo_setting('Org/repo-a', state, 'allow_auto_merge'))
+        api.assert_called_once_with('repos/Org/repo-a', token='test-writer-token')
+
+    def test_scanner_error_is_processing_error(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        repo = {'name': 'repo-a', 'full_name': 'Org/repo-a', 'default_branch': 'main', 'html_url': 'https://example.invalid'}
+        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('unavailable')):
+            entry = scanner.scan(repo, gr.check_secret_scan(0, error='scanner failed'))
+        self.assertIn('secret_scan: scanner failed', entry['errors'])
+
     def test_delete_branch(self):
         self.assertEqual(gr.check_delete_branch(None)['status'], gr.NA)
         self.assertEqual(gr.check_delete_branch(False)['status'], gr.FAIL)
@@ -186,6 +238,15 @@ class OtherCheckTests(unittest.TestCase):
         self.assertEqual(failed['status'], gr.ERROR)
         self.assertNotIn('sensitive data', str(failed))
         self.assertEqual(passed['status'], gr.OK)
+
+    def test_local_git_finding_attribution_and_malformed_output(self):
+        repo = {'name': 'repo-a', 'full_name': 'Org/repo-a'}
+        finding = '{"Verified":true,"Raw":"sensitive-example","SourceMetadata":{"Data":{"Git":{"repository":"file:///scan/repository.git"}}}}'
+        check = gr.check_trufflehog_result(0, finding, repo, local_repository=True)
+        self.assertEqual(check['status'], gr.FAIL)
+        self.assertIn('1 verified', check['summary'])
+        self.assertNotIn('sensitive-example', str(check))
+        self.assertEqual(gr.check_trufflehog_result(0, 'not json', repo)['status'], gr.ERROR)
 
     def test_dependabot_config(self):
         self.assertEqual(gr.check_dependabot_config(None, [])['status'], gr.FAIL)

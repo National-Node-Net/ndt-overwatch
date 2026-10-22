@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Crown Copyright 2026. Developed by the National Digital Twin Programme and legally attributed to the UK's Department for Business, Innovation, Science and Trade (BIST).
 
-# Organisation-wide OSPO governance report. Not listed in organisation-required-workflows.txt:
-# it runs only in ospo-resources and scans every active repository in the organisation.
+# Organisation-wide report hosted in ndt-overwatch, not synchronised into target repositories.
 
 name: OSPO governance report
 
@@ -63,6 +62,15 @@ jobs:
           owner: ${{ github.repository_owner }}
           permission-pull-requests: write
 
+      - name: Get repository settings token
+        id: settings_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: '4265891'
+          private-key: ${{ secrets.NODE_NET_REPOSITORY_WRITER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: write
+
       - name: Checkout OSPO policies and manifests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,6 +98,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.reader_token.outputs.token }}
           PR_TOKEN: ${{ steps.pr_token.outputs.token }}
+          SETTINGS_TOKEN: ${{ steps.settings_token.outputs.token }}
           REMINDER_AUTHOR: ${{ steps.pr_token.outputs.app-slug }}[bot]
           HUMAN_PR_DAYS: ${{ github.event.inputs.human_pr_days || '30' }}
           DEPENDABOT_PR_DAYS: ${{ github.event.inputs.dependabot_pr_days || '14' }}
