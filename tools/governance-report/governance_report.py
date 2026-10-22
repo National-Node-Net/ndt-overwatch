@@ -16,11 +16,14 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
 DEPENDABOT = 'dependabot[bot]'
 DEFAULT_EXCLUSIONS_FILE = Path(__file__).with_name('excluded-repositories.txt')
+GOVERNANCE_PATHS_FILE = Path(__file__).with_name('governance-only-paths.txt')
+GOVERNANCE_ACTIVITY_REPOSITORIES_FILE = Path(__file__).with_name('governance-activity-repositories.txt')
 TEMPLATE_FILES = [
     '.github/PULL_REQUEST_TEMPLATE.md',
     '.github/ISSUE_TEMPLATE/bug_report.md',
@@ -76,13 +79,13 @@ GRAPHQL_ACTIVITY = '''
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     develop: ref(qualifiedName: "refs/heads/develop") {
-            target { ... on Commit { history(first: 100) { nodes { committedDate messageHeadline messageBody author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
+            target { ... on Commit { history(first: 100) { nodes { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
     }
     defaultBranchRef {
-            target { ... on Commit { history(first: 100) { nodes { committedDate messageHeadline messageBody author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
+            target { ... on Commit { history(first: 100) { nodes { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
     }
     refs(refPrefix: "refs/heads/", first: 100, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
-    nodes { name target { ... on Commit { committedDate messageHeadline messageBody author { name user { login __typename } } } } }
+    nodes { name target { ... on Commit { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } } }
     }
   }
 }
@@ -92,7 +95,7 @@ GRAPHQL_HISTORY_PAGE = '''
 query($owner: String!, $name: String!, $branch: String!, $after: String) {
     repository(owner: $owner, name: $name) {
         ref(qualifiedName: $branch) {
-            target { ... on Commit { history(first: 100, after: $after) { nodes { committedDate messageHeadline messageBody author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
+            target { ... on Commit { history(first: 100, after: $after) { nodes { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
         }
     }
 }
@@ -167,7 +170,16 @@ def is_bot_author(author):
 
 def is_automation_commit(commit):
     message = f'{commit.get("messageHeadline") or ""}\n{commit.get("messageBody") or ""}'.casefold()
-    return is_bot_author(commit.get('author')) or 'ospo' in message
+    return is_bot_author(commit.get('author')) or ('ospo' in message and not commit.get('includeGovernanceActivity', False))
+
+
+def is_governance_only(paths, patterns):
+    return bool(paths) and all(any(fnmatchcase(path, pattern) for pattern in patterns) for path in paths)
+
+
+def is_activity_commit(commit):
+    return (not is_automation_commit(commit) and not commit.get('governanceOnly', False)
+            and (commit.get('parents') or {}).get('totalCount', 0) < 2)
 
 
 def is_bot_user(user):
@@ -344,7 +356,7 @@ def check_dependabot_auto_merge(workflow_run, jobs):
 
 def check_activity(activity, now, days):
     develop = activity.get('develop')
-    branch_name = 'develop' if develop else 'default branch'
+    branch_name = 'develop' if develop else activity.get('activityBranch', 'default branch')
     source = develop or activity.get('defaultBranchRef') or {}
     history = (((source.get('target') or {}).get('history')) or {}).get('nodes', [])
     latest_human = activity.get('latestHumanCommit') or latest_human_commit(history)
@@ -355,12 +367,12 @@ def check_activity(activity, now, days):
         if node['name'].startswith(WORK_BRANCH_PREFIXES)
         and (node.get('target') or {}).get('committedDate')
         and parse_time(node['target']['committedDate']) >= since
-        and not is_automation_commit(node['target'])
+        and is_activity_commit(node['target'])
     ]
     human_activity_recent = days_since_human is not None and days_since_human <= days
     activity_summary = (
-        f'{days_since_human} days since last human commit'
-        if days_since_human is not None else 'no human commit found'
+        f'{days_since_human} days since last commit on {branch_name}'
+        if days_since_human is not None else f'no qualifying human commit found on {branch_name}'
     )
     activity_summary += f'; {len(active_branches)} active work branches ({days}d window)'
     if human_activity_recent or active_branches:
@@ -373,7 +385,7 @@ def check_activity(activity, now, days):
 
 
 def latest_human_commit(commits):
-    human = [commit for commit in commits if not is_automation_commit(commit)]
+    human = [commit for commit in commits if is_activity_commit(commit)]
     return max(human, key=lambda commit: commit['committedDate']) if human else None
 
 
@@ -451,6 +463,9 @@ class Scanner:
         self.policy_dir = source_root / 'tools/policy-as-code/policy'
         self.conftest = shutil.which('conftest')
         self._inner_source_files = None
+        self.governance_paths = read_list_file(GOVERNANCE_PATHS_FILE.read_text(encoding='utf-8'))
+        self.governance_activity_repositories = load_exclusions(GOVERNANCE_ACTIVITY_REPOSITORIES_FILE, self.org)
+        self._activity_commit_cache = {}
 
     def inner_source_files(self):
         if self._inner_source_files is None:
@@ -587,26 +602,8 @@ class Scanner:
                 entry['errors'].append('tree: listing truncated, file checks may be incomplete')
 
         def load_activity():
-            data = gh_api('graphql', fields={
-                'query': GRAPHQL_ACTIVITY, 'owner': self.org, 'name': name,
-            })
-            state['activity'] = data['data']['repository']
+            state['activity'] = self.repository_activity(full, default)
             state['has_develop'] = state['activity'].get('develop') is not None
-            ref_name = 'develop' if state['has_develop'] else default
-            source = state['activity'].get('develop') or state['activity'].get('defaultBranchRef') or {}
-            history = (((source.get('target') or {}).get('history')) or {})
-            latest = latest_human_commit(history.get('nodes', []))
-            page_info = history.get('pageInfo') or {}
-            while latest is None and page_info.get('hasNextPage'):
-                page = gh_api('graphql', fields={
-                    'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': name,
-                    'branch': f'refs/heads/{ref_name}', 'after': page_info['endCursor'],
-                })
-                ref = (page.get('data', {}).get('repository') or {}).get('ref') or {}
-                history = (((ref.get('target') or {}).get('history')) or {})
-                latest = latest_human_commit(history.get('nodes', []))
-                page_info = history.get('pageInfo') or {}
-            state['activity']['latestHumanCommit'] = latest
 
         try:
             load_tree()
@@ -642,6 +639,89 @@ class Scanner:
         run('dependabot_prs', lambda: check_dependabot_prs(prs, self.now, self.args.dependabot_pr_days))
         run('human_prs', lambda: check_human_prs(prs, self.now, self.args.human_pr_days, self.remind(full, prs, entry)))
         return entry
+
+    def commit_counts_as_activity(self, full, commit):
+        include_governance = full.split('/', 1)[1].casefold() in self.governance_activity_repositories
+        commit['includeGovernanceActivity'] = include_governance
+        if include_governance:
+            commit['governanceOnly'] = False
+        if not is_activity_commit(commit):
+            return False
+        key = (full, commit['oid'])
+        if key not in self._activity_commit_cache:
+            page = 1
+            paths = []
+            while True:
+                response = gh_api(f'repos/{full}/commits/{commit["oid"]}?per_page=100&page={page}')
+                if 'files' not in response:
+                    raise ApiError('Commit file list unavailable; cannot classify activity')
+                files = response['files']
+                for file in files:
+                    paths.append(file['filename'])
+                    if file.get('previous_filename'):
+                        paths.append(file['previous_filename'])
+                if paths and (include_governance or not is_governance_only(paths, self.governance_paths)):
+                    self._activity_commit_cache[key] = True
+                    break
+                if len(files) < 100:
+                    self._activity_commit_cache[key] = False
+                    break
+                if page >= 30:
+                    raise ApiError('Commit file list reaches GitHub limit; cannot classify governance-only activity')
+                page += 1
+        commit['governanceOnly'] = not self._activity_commit_cache[key]
+        return self._activity_commit_cache[key]
+
+    def latest_project_commit(self, full, branch, history, since=None):
+        while True:
+            nodes = sorted(history.get('nodes', []), key=lambda node: node['committedDate'], reverse=True)
+            for node in nodes:
+                if since and parse_time(node['committedDate']) < since:
+                    continue
+                if self.commit_counts_as_activity(full, node):
+                    return node
+            page_info = history.get('pageInfo') or {}
+            if not page_info.get('hasNextPage'):
+                return None
+            if since and nodes and max(parse_time(node['committedDate']) for node in nodes) < since:
+                return None
+            data = gh_api('graphql', fields={
+                'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
+                'branch': f'refs/heads/{branch}', 'after': page_info['endCursor'],
+            })
+            ref = data['data']['repository']['ref']
+            if ref is None:
+                raise ApiError('Activity branch disappeared during history scan')
+            history = ref['target']['history']
+
+    def repository_activity(self, full, default):
+        data = gh_api('graphql', fields={
+            'query': GRAPHQL_ACTIVITY, 'owner': self.org, 'name': full.split('/', 1)[1],
+        })
+        activity = data['data']['repository']
+        source = activity.get('develop') or activity.get('defaultBranchRef') or {}
+        branch = 'develop' if activity.get('develop') else default
+        activity['activityBranch'] = branch
+        history = ((source.get('target') or {}).get('history')) or {}
+        activity['latestHumanCommit'] = self.latest_project_commit(full, branch, history)
+        since = self.now - timedelta(days=self.args.dormant_days)
+        for work_branch in (activity.get('refs') or {}).get('nodes', []):
+            tip = work_branch.get('target')
+            if not tip or not work_branch['name'].startswith(WORK_BRANCH_PREFIXES):
+                continue
+            if parse_time(tip['committedDate']) < since:
+                continue
+            if not self.commit_counts_as_activity(full, tip):
+                data = gh_api('graphql', fields={
+                    'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
+                    'branch': f'refs/heads/{work_branch["name"]}',
+                })
+                ref = data['data']['repository']['ref']
+                if ref is None:
+                    raise ApiError('Work branch disappeared during activity scan')
+                latest = self.latest_project_commit(full, work_branch['name'], ref['target']['history'], since)
+                work_branch['target'] = latest
+        return activity
 
     def dependabot_config(self, full, default, paths, has_develop):
         config_path = next((path for path in DEPENDABOT_CONFIGS if path in paths), None)
@@ -830,7 +910,10 @@ def render_markdown(report):
         'Draft PRs are reported but not reminded.',
         f'- **Activity:** exact whole days since the latest human-authored commit on `develop` (or default branch when no `develop` exists). '
         f'All bot-authored commits and any commit with `OSPO` anywhere in its subject or body are ignored. Dormant warning threshold: '
-        f'>{args["dormant_days"]} days with no recent human work branch.',
+        f'>{args["dormant_days"]} days with no recent human work branch. Commits changing only paths in '
+        '`governance-only-paths.txt` are also ignored; mixed governance/project changes still count. '
+        'For repositories in `governance-activity-repositories.txt`, human OSPO commits and governance-only changes count. '
+        'Bots remain excluded. Merge commits do not refresh activity age; original ancestor commits are evaluated instead.',
         '- **Credential scan:** TruffleHog scans selected active repositories, excluding configured repositories, for verified credentials only. '
         'The report records counts/status only; it never stores credential values or finding locations.',
         '- **AI use:** none. The report script uses Python, GitHub CLI/API, Conftest and TruffleHog; it does not call an AI model.',
@@ -927,7 +1010,10 @@ def render_html(report):
         f'<li><strong>Dependabot PR age:</strong> WARN &gt;{args["dependabot_pr_days"]}d, FAIL &gt;{VERY_OLD_DEPENDABOT_DAYS}d.</li>',
         f'<li><strong>Human PR age:</strong> WARN/reminder &gt;{args["human_pr_days"]}d; no separate FAIL age threshold is configured.</li>',
         f'<li><strong>Repository activity:</strong> exact whole days since latest human commit; dormant warning after {args["dormant_days"]}d.</li>',
-        '<li><strong>Activity exclusions:</strong> ignores all bot-authored commits and any commit with OSPO in its subject or body.</li>',
+        '<li><strong>Activity exclusions:</strong> ignores bot-authored commits, OSPO in commit subject/body, and commits changing only '
+        'paths in <code>governance-only-paths.txt</code>. Mixed governance/project changes still count. '
+        'Repositories in <code>governance-activity-repositories.txt</code> count human OSPO commits and governance-only changes; bots remain excluded. '
+        'Merge commits do not refresh activity age; original ancestor commits are evaluated instead.</li>',
         '<li><strong>Credential scan:</strong> TruffleHog scans verified credentials only; values and locations are not recorded.</li>',
         '<li><strong>Dependabot GitHub Actions auto-merge workflow:</strong> checks the latest applicable run and job steps. '
         'OK requires successful auto-merge enablement; FAIL means a failed attempt; WARN means running or unconfirmed. '

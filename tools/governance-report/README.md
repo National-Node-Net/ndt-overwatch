@@ -42,7 +42,7 @@ the HTML equivalent uses 75% text. GitHub controls the final Markdown typography
 | Release SBOM | Releases published in the window (default 90 days, otherwise the latest release) have an `*.spdx.json` or `*sbom*` asset | FAIL if missing |
 | Auto-delete branches | `delete_branch_on_merge` | FAIL if off, N/A if the token cannot see it |
 | Dependabot GitHub Actions auto-merge workflow | Latest applicable `auto-merge-dependabot-pull-requests.yml` run and its job steps; ignores human PR skips and non-GitHub-Actions update skips | OK only if the auto-merge enablement step succeeded; FAIL if missing/failed; WARN if running or unconfirmed; N/A if no applicable run or inaccessible history |
-| Activity | Exact days since the latest human-authored commit to `develop` (or the default branch); excludes all bot-authored commits and any commit with `OSPO` anywhere in its subject or body | WARN if over 180 days and no active human work branch |
+| Activity | Exact days since the latest qualifying human commit to `develop` (or the default branch); excludes bots, `OSPO` in the subject/body, and governance-only file changes | WARN if over 180 days and no active human work branch |
 | OSPO workflows | Workflows listed in `organisation-required-workflows.txt` exist on each repository's default branch and match this checkout byte for byte | FAIL if missing, WARN if out of sync |
 | Main-to-develop back-merge | Latest actual run of `.github/workflows/auto-back-merge.yml`; skipped runs from closed, unmerged PRs are ignored | OK if passed, FAIL if failed, WARN if running/other conclusion, N/A if no run or Actions history is not visible |
 
@@ -50,6 +50,24 @@ The report's Legend section lists all governance-file and template paths, the De
 and the PR/activity thresholds. The Python script uses no AI or LLM.
 
 Bot commits are those whose author name or login ends in `[bot]`.
+
+### Governance-only activity exclusions
+
+[`governance-only-paths.txt`](governance-only-paths.txt) lists repository-relative, case-sensitive glob patterns.
+It currently covers `.github/**`, licences and standard root governance documents (including changelog).
+README and application documentation are not excluded. Blank lines and `#` comment lines are ignored.
+A commit is ignored only when all changed paths match; mixed project/governance commits count as activity.
+Renames check both the original and new paths. Empty commits do not count as project activity.
+The same filter applies to develop/default-branch age and work-branch history. The scanner pages past
+governance-only commits, caches commit classifications, and reports an error if file history cannot be
+classified completely rather than assuming the repository is active.
+Merge commits do not refresh activity age; the original commits in their ancestry are evaluated instead.
+
+[`governance-activity-repositories.txt`](governance-activity-repositories.txt) lists repositories whose
+purpose is governance. It currently contains `ospo-resources`, `ndt-overwatch`, and `private-ospo-resources`.
+Human OSPO commits and governance-only file changes count as activity in those repositories, on both
+develop/default and work branches. Bot commits (including Dependabot and OSPO Apps) and merge commits
+remain excluded. All other repositories retain the stricter OSPO/governance-only exclusions.
 
 ## PR reminders
 

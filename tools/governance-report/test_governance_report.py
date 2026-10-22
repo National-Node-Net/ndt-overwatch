@@ -115,6 +115,142 @@ class SbomTests(unittest.TestCase):
 
 
 class ActivityTests(unittest.TestCase):
+    def scanner(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        scanner.governance_paths = gr.read_list_file(gr.GOVERNANCE_PATHS_FILE.read_text())
+        scanner.governance_activity_repositories = gr.load_exclusions(gr.GOVERNANCE_ACTIVITY_REPOSITORIES_FILE, 'Org')
+        scanner._activity_commit_cache = {}
+        scanner.org = 'Org'
+        scanner.now = NOW
+        scanner.args = SimpleNamespace(dormant_days=180)
+        return scanner
+
+    def test_governance_only_paths_and_mixed_changes(self):
+        rules = self.scanner().governance_paths
+        self.assertTrue(gr.is_governance_only(['.github/workflows/ci.yml', 'LICENSE.md'], rules))
+        self.assertFalse(gr.is_governance_only(['.github/workflows/ci.yml', 'src/main.py'], rules))
+        self.assertFalse(gr.is_governance_only(['README.md'], rules))
+        self.assertFalse(gr.is_governance_only([], rules))
+
+    def test_governance_repositories_count_human_ospo_and_governance_files(self):
+        scanner = self.scanner()
+        self.assertEqual(scanner.governance_activity_repositories,
+                         {'ospo-resources', 'ndt-overwatch', 'private-ospo-resources'})
+        for name in scanner.governance_activity_repositories:
+            for message in ('feat(OSPO): update policy', 'fix(ci): pin workflow actions'):
+                with self.subTest(repository=name, message=message):
+                    node = {**commit(2, message=message), 'oid': 'governance-' + message}
+                    with patch.object(gr, 'gh_api', return_value={'files': [{'filename': '.github/workflows/ci.yml'}]}):
+                        self.assertTrue(scanner.commit_counts_as_activity('Org/' + name, node))
+                    self.assertTrue(gr.is_activity_commit(node))
+
+    def test_governance_repositories_still_exclude_bots_and_merges(self):
+        scanner = self.scanner()
+        with patch.object(gr, 'gh_api') as api:
+            for node in (
+                commit(1, login='dependabot[bot]', message='build(deps): update'),
+                commit(1, login='node-net-repository-writer[bot]', message='feat(OSPO): sync'),
+                {**commit(1, message='feat(OSPO): merge'), 'parents': {'totalCount': 2}},
+            ):
+                self.assertFalse(scanner.commit_counts_as_activity('Org/ospo-resources', node))
+        api.assert_not_called()
+
+    def test_governance_exception_applies_to_age_and_branch_activity(self):
+        scanner = self.scanner()
+        node = {**commit(3, message='feat(OSPO): update governance'), 'oid': 'ospo-work'}
+        with patch.object(gr, 'gh_api', return_value={'files': [{'filename': 'LICENSE.md'}]}):
+            self.assertTrue(scanner.commit_counts_as_activity('Org/ndt-overwatch', node))
+        activity = self.activity([node], [{'name': 'feature/governance', 'target': node}])
+        activity['latestHumanCommit'] = node
+        check = gr.check_activity(activity, NOW, 180)
+        self.assertEqual(check['status'], gr.OK)
+        self.assertIn('3 days since last commit on develop', check['summary'])
+        self.assertIn('1 active work branches', check['summary'])
+
+    def test_commit_file_classification_is_cached(self):
+        scanner = self.scanner()
+        node = {**commit(7, message='fix(ci): pin workflow actions'), 'oid': 'abc'}
+        response = {'files': [{'filename': '.github/workflows/ci.yml'}]}
+        with patch.object(gr, 'gh_api', return_value=response) as api:
+            self.assertFalse(scanner.commit_counts_as_activity('Org/repo', node))
+            self.assertFalse(scanner.commit_counts_as_activity('Org/repo', dict(node)))
+        self.assertEqual(api.call_count, 1)
+        self.assertTrue(node['governanceOnly'])
+
+    def test_bot_and_ospo_commits_do_not_request_file_diffs(self):
+        scanner = self.scanner()
+        with patch.object(gr, 'gh_api') as api:
+            self.assertFalse(scanner.commit_counts_as_activity('Org/repo', commit(1, login='dependabot[bot]')))
+            self.assertFalse(scanner.commit_counts_as_activity('Org/repo', commit(1, message='fix: OSPO change')))
+        api.assert_not_called()
+
+    def test_merge_commits_do_not_refresh_activity(self):
+        scanner = self.scanner()
+        merge = {**commit(1, message='Promote release'), 'parents': {'totalCount': 2}}
+        with patch.object(gr, 'gh_api') as api:
+            self.assertFalse(scanner.commit_counts_as_activity('Org/repo', merge))
+        api.assert_not_called()
+        original = commit(200, message='feat: actual project change')
+        self.assertEqual(gr.latest_human_commit([merge, original]), original)
+
+    def test_rename_of_project_file_to_governance_path_counts(self):
+        scanner = self.scanner()
+        node = {**commit(7), 'oid': 'rename'}
+        with patch.object(gr, 'gh_api', return_value={'files': [{
+            'filename': '.github/example.py', 'previous_filename': 'src/example.py',
+        }]}):
+            self.assertTrue(scanner.commit_counts_as_activity('Org/repo', node))
+
+    def test_governance_file_pagination_finds_project_change(self):
+        scanner = self.scanner()
+        pages = [{'files': [{'filename': '.github/workflows/ci.yml'}] * 100},
+                 {'files': [{'filename': 'src/main.py'}]}]
+        with patch.object(gr, 'gh_api', side_effect=pages) as api:
+            self.assertTrue(scanner.commit_counts_as_activity('Org/repo', {**commit(2), 'oid': 'large'}))
+        self.assertIn('page=2', api.call_args_list[-1].args[0])
+
+    def test_incomplete_commit_diff_is_not_counted_as_activity(self):
+        scanner = self.scanner()
+        with patch.object(gr, 'gh_api', return_value={}), self.assertRaises(gr.ApiError):
+            scanner.commit_counts_as_activity('Org/repo', {**commit(2), 'oid': 'incomplete'})
+
+    def test_history_pages_past_governance_to_project_commit(self):
+        scanner = self.scanner()
+        workflow = {**commit(7, message='fix(ci): pin workflow actions'), 'oid': 'workflow'}
+        project = {**commit(200), 'oid': 'project'}
+        history = {'nodes': [workflow], 'pageInfo': {'hasNextPage': True, 'endCursor': 'cursor1'}}
+        responses = [
+            {'files': [{'filename': '.github/workflows/ci.yml'}]},
+            {'data': {'repository': {'ref': {'target': {'history': {
+                'nodes': [project], 'pageInfo': {'hasNextPage': False},
+            }}}}}},
+            {'files': [{'filename': 'src/main.py'}]},
+        ]
+        with patch.object(gr, 'gh_api', side_effect=responses):
+            latest = scanner.latest_project_commit('Org/repo', 'develop', history)
+        self.assertEqual(latest['oid'], 'project')
+        activity = self.activity([workflow])
+        activity['latestHumanCommit'] = latest
+        self.assertIn('200 days since last commit on develop', gr.check_activity(activity, NOW, 180)['summary'])
+
+    def test_older_project_work_survives_governance_branch_tip(self):
+        scanner = self.scanner()
+        workflow = {**commit(1), 'oid': 'workflow'}
+        project = {**commit(5), 'oid': 'project'}
+        activity = self.activity([], [{'name': 'feature/work', 'target': workflow}])
+        responses = [
+            {'data': {'repository': activity}},
+            {'files': [{'filename': '.github/workflows/ci.yml'}]},
+            {'data': {'repository': {'ref': {'target': {'history': {
+                'nodes': [workflow, project], 'pageInfo': {'hasNextPage': False},
+            }}}}}},
+            {'files': [{'filename': 'src/main.py'}]},
+        ]
+        with patch.object(gr, 'gh_api', side_effect=responses):
+            activity = scanner.repository_activity('Org/repo', 'main')
+        self.assertEqual(activity['refs']['nodes'][0]['target']['oid'], 'project')
+        self.assertEqual(gr.check_activity(activity, NOW, 180)['status'], gr.OK)
+
     def activity(self, develop_nodes, refs=()):
         history = {'target': {'history': {'nodes': develop_nodes}}}
         return {'develop': history, 'defaultBranchRef': {'target': {'history': {'nodes': []}}}, 'refs': {'nodes': list(refs)}}
@@ -137,6 +273,13 @@ class ActivityTests(unittest.TestCase):
     def test_human_commit_is_active(self):
         self.assertEqual(gr.check_activity(self.activity([commit(3, 'Bob', None)]), NOW, 180)['status'], gr.OK)
 
+    def test_activity_label_names_actual_default_branch(self):
+        activity = {'develop': None, 'activityBranch': 'main',
+                    'defaultBranchRef': {'target': {'history': {'nodes': [commit(3)]}}}, 'refs': {'nodes': []}}
+        check = gr.check_activity(activity, NOW, 180)
+        self.assertIn('3 days since last commit on main', check['summary'])
+        self.assertNotIn('on develop', check['summary'])
+
     def test_exact_days_since_human_commit_ignores_ospo_and_bot_commits(self):
         commits = [
             commit(2, 'Dependabot[bot]', 'dependabot[bot]'),
@@ -145,7 +288,7 @@ class ActivityTests(unittest.TestCase):
         ]
         check = gr.check_activity(self.activity(commits), NOW, 180)
         self.assertEqual(check['status'], gr.OK)
-        self.assertIn('17 days since last human commit', check['summary'])
+        self.assertIn('17 days since last commit on develop', check['summary'])
 
     def test_ospo_only_commits_are_not_human_activity(self):
         commits = [commit(1, 'Alice', 'alice', 'fix: update config for OSPO request')]
