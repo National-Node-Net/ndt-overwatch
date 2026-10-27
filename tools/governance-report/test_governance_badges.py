@@ -66,54 +66,57 @@ class GovernanceBadgeTests(unittest.TestCase):
         self.assertEqual(value_for(generated['develop-activity.svg']), '22 days')
         self.assertEqual(color_for(generated['develop-activity.svg']), badges.GREEN)
         self.assertEqual(value_for(generated['last-checked.svg']), '2026-10-27 12:00 UTC')
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.RED)
 
-    def test_each_nonpassing_or_unknown_status_is_amber(self):
+    def test_last_checked_age_band_is_independent_of_check_results(self):
         for status in (WARN, FAIL, ERROR, NA, 'MYSTERY'):
             with self.subTest(status=status):
                 report = deepcopy(self.report)
+                report['completed_at'] = (NOW - timedelta(days=4)).isoformat()
                 report['repositories'][0]['checks'][COLUMNS[0][0]]['status'] = status
                 generated = self.badges(report)
                 self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-                if status in (ERROR, NA, 'MYSTERY'):
-                    self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
-                else:
-                    self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+                self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
 
-    def test_missing_check_is_amber_and_incomplete(self):
+    def test_missing_check_keeps_age_band_independent(self):
         report = deepcopy(self.report)
+        report['completed_at'] = (NOW - timedelta(days=4)).isoformat()
         del report['repositories'][0]['checks'][COLUMNS[0][0]]
         generated = self.badges(report)
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
 
     def test_explicit_not_applicable_is_allowed_but_unknown_na_is_not(self):
         key = COLUMNS[0][0]
         report = deepcopy(self.report)
+        report['completed_at'] = (NOW - timedelta(days=4)).isoformat()
         report['repositories'][0]['checks'][key] = {'status': NA, 'applicable': False}
         self.assertEqual(color_for(self.badges(report)['ospo-compliance.svg']), badges.GREEN)
 
         for check in ({'status': NA}, {'status': NA, 'applicable': True}):
             with self.subTest(check=check):
                 report = deepcopy(self.report)
+                report['completed_at'] = (NOW - timedelta(days=4)).isoformat()
                 report['repositories'][0]['checks'][key] = check
                 generated = self.badges(report)
                 self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-                self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
+                self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
 
     def test_not_applicable_cannot_hide_a_failure(self):
         report = deepcopy(self.report)
+        report['completed_at'] = (NOW - timedelta(days=4)).isoformat()
         report['repositories'][0]['checks'][COLUMNS[0][0]] = {'status': FAIL, 'applicable': False}
         generated = self.badges(report)
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
 
-    def test_errors_make_compliance_and_last_checked_amber(self):
+    def test_errors_do_not_change_recent_last_checked_age_band(self):
         report = deepcopy(self.report)
+        report['completed_at'] = (NOW - timedelta(days=4)).isoformat()
         report['repositories'][0]['errors'] = ['private scanner failure text']
         generated = self.badges(report)
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
 
     def test_missing_report_and_missing_completed_at_never_fabricate_dates(self):
         for report in (None, {}):
@@ -121,14 +124,16 @@ class GovernanceBadgeTests(unittest.TestCase):
             self.assertEqual(value_for(generated['ospo-compliance.svg']), 'not checked')
             self.assertEqual(value_for(generated['develop-activity.svg']), 'unknown')
             self.assertEqual(value_for(generated['last-checked.svg']), 'not checked')
-            self.assertTrue(all(color_for(svg) == badges.AMBER for svg in generated.values()))
+            self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
+            self.assertEqual(color_for(generated['develop-activity.svg']), badges.AMBER)
+            self.assertEqual(color_for(generated['last-checked.svg']), badges.RED)
 
         report = deepcopy(self.report)
         del report['completed_at']
         generated = self.badges(report)
         self.assertEqual(value_for(generated['last-checked.svg']), 'not checked')
 
-    def test_future_malformed_and_naive_scan_timestamps_never_green(self):
+    def test_future_malformed_and_naive_scan_timestamps_are_red(self):
         for value in (
             (NOW + timedelta(seconds=1)).isoformat(),
             'not-an-iso-timestamp',
@@ -139,7 +144,9 @@ class GovernanceBadgeTests(unittest.TestCase):
                 report['completed_at'] = value
                 generated = self.badges(report)
                 self.assertEqual(value_for(generated['last-checked.svg']), 'not checked')
-                self.assertTrue(all(color_for(svg) == badges.AMBER for svg in generated.values()))
+                self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
+                self.assertEqual(color_for(generated['develop-activity.svg']), badges.AMBER)
+                self.assertEqual(color_for(generated['last-checked.svg']), badges.RED)
 
     def test_missing_no_develop_or_future_develop_commit_is_unknown(self):
         for activity in (
@@ -199,6 +206,21 @@ class GovernanceBadgeTests(unittest.TestCase):
         report['completed_at'] = NOW.astimezone(timezone(timedelta(hours=2))).isoformat()
         generated = self.badges(report)
         self.assertEqual(value_for(generated['last-checked.svg']), '2026-10-27 12:00 UTC')
+
+    def test_last_checked_age_bands_are_red_under_three_green_to_eight_amber_from_eight(self):
+        for age, expected in (
+            (timedelta(days=2, hours=23, minutes=59, seconds=59), badges.RED),
+            (timedelta(days=3), badges.GREEN),
+            (timedelta(days=7, hours=23, minutes=59, seconds=59), badges.GREEN),
+            (timedelta(days=8), badges.AMBER),
+            (timedelta(days=8, seconds=1), badges.AMBER),
+            (timedelta(seconds=0), badges.RED),
+        ):
+            with self.subTest(age=age):
+                report = deepcopy(self.report)
+                report['completed_at'] = (NOW - age).isoformat()
+                generated = self.badges(report)
+                self.assertEqual(color_for(generated['last-checked.svg']), expected)
 
     def test_identity_exclusions_missing_and_duplicate_targets_are_conservative(self):
         variants = []
@@ -285,7 +307,7 @@ class GovernanceBadgeTests(unittest.TestCase):
             for path in output.iterdir():
                 ET.parse(path)
 
-    def test_malformed_cli_report_recovers_with_amber_and_nonzero(self):
+    def test_malformed_cli_report_recovers_with_placeholders_and_nonzero(self):
         script = Path(badges.__file__).resolve()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -299,7 +321,8 @@ class GovernanceBadgeTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual({path.name for path in output.iterdir()}, set(badges.BADGE_FILENAMES))
             for path in output.iterdir():
-                self.assertEqual(color_for(path.read_text(encoding='utf-8')), badges.AMBER)
+                expected = badges.RED if path.name == 'last-checked.svg' else badges.AMBER
+                self.assertEqual(color_for(path.read_text(encoding='utf-8')), expected)
                 ET.parse(path)
             self.assertNotIn('malformed', result.stderr.lower())
 

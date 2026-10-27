@@ -7,7 +7,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -15,6 +15,9 @@ from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN
 
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
+RED = '#cf222e'
+LAST_CHECKED_GREEN_AFTER = timedelta(days=3)
+LAST_CHECKED_AMBER_AFTER = timedelta(days=8)
 BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
 REPORT_KEYS = ('organisation', 'generated_at', 'mode', 'parameters', 'skipped', 'excluded', 'legend', 'repositories')
 OWNER_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]*\Z')
@@ -78,7 +81,7 @@ def _badge_svg(label, value, color):
 
 
 def _badges(compliance, activity, last_checked, *, compliance_color=AMBER,
-            activity_color=AMBER, last_checked_color=AMBER):
+            activity_color=AMBER, last_checked_color=RED):
     return {
         BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', compliance, compliance_color),
         BADGE_FILENAMES[1]: _badge_svg('Develop activity', activity, activity_color),
@@ -210,7 +213,13 @@ def generate_badges(report, repository, now=None):
 
     checks_complete, checks_pass = _check_state(target)
     checked_text = completed_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    last_checked_color = GREEN if checks_complete else AMBER
+    report_age = current_time - completed_at
+    if report_age < LAST_CHECKED_GREEN_AFTER:
+        last_checked_color = RED
+    elif report_age < LAST_CHECKED_AMBER_AFTER:
+        last_checked_color = GREEN
+    else:
+        last_checked_color = AMBER
 
     age = _develop_age(target, completed_at)
     threshold = report['parameters']['dormant_days']

@@ -31,7 +31,9 @@ nor distributes a workflow to other repositories. Initial assets are amber place
 	Uses the existing bot/merge/governance filters and repository exceptions. Work-branch activity cannot
 	reset this age. Missing `develop` or unavailable commit data shows `unknown`, not default-branch age.
 - **Last checked:** actual scan completion time in UTC, not workflow start or badge publication time.
-	Green means checks completed, not that they all passed; incomplete checks keep it amber.
+	The color indicates age regardless of check findings: red when the report is less than three days old,
+	green from three days up to (but not including) eight days, and amber from eight days onward. Missing or
+	invalid timestamps are red. Compliance pass/fail is shown separately.
 
 The existing report still checks governance files and workflows on each repository's default branch;
 these badges are results for `ndt-overwatch`, not a claim that the feature-branch tree passed those checks.
@@ -46,7 +48,8 @@ GET-only. Bot badge commits do not count as human development activity or retrig
 
 Badges update on the existing feature-branch push runs, not nightly. GitHub scheduled runs use the default
 branch, so scheduling is unchanged for this feature-only pilot. Static SVGs cannot expire or increment age
-when a workflow stops; read the visible timestamp. No new freshness policy is introduced.
+when a workflow stops; their color bands are recalculated only when another run regenerates the SVG, so read
+the timestamp and use separate monitoring if the workflow itself stops.
 
 `governance_badges.py` also accepts `--report PATH --repository OWNER/NAME --output-dir PATH` locally.
 Omitting `--report` generates the initial placeholders. Existing malformed reports generate placeholders
