@@ -215,11 +215,11 @@ def generate_badges(report, repository, now=None):
     checked_text = completed_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     report_age = current_time - completed_at
     if report_age < LAST_CHECKED_GREEN_AFTER:
-        last_checked_color = RED
-    elif report_age < LAST_CHECKED_AMBER_AFTER:
         last_checked_color = GREEN
-    else:
+    elif report_age <= LAST_CHECKED_AMBER_AFTER:
         last_checked_color = AMBER
+    else:
+        last_checked_color = RED
 
     age = _develop_age(target, completed_at)
     threshold = report['parameters']['dormant_days']

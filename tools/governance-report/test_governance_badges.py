@@ -66,7 +66,7 @@ class GovernanceBadgeTests(unittest.TestCase):
         self.assertEqual(value_for(generated['develop-activity.svg']), '22 days')
         self.assertEqual(color_for(generated['develop-activity.svg']), badges.GREEN)
         self.assertEqual(value_for(generated['last-checked.svg']), '2026-10-27 12:00 UTC')
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.RED)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
 
     def test_last_checked_age_band_is_independent_of_check_results(self):
         for status in (WARN, FAIL, ERROR, NA, 'MYSTERY'):
@@ -76,7 +76,7 @@ class GovernanceBadgeTests(unittest.TestCase):
                 report['repositories'][0]['checks'][COLUMNS[0][0]]['status'] = status
                 generated = self.badges(report)
                 self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-                self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+                self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
 
     def test_missing_check_keeps_age_band_independent(self):
         report = deepcopy(self.report)
@@ -84,7 +84,7 @@ class GovernanceBadgeTests(unittest.TestCase):
         del report['repositories'][0]['checks'][COLUMNS[0][0]]
         generated = self.badges(report)
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
 
     def test_explicit_not_applicable_is_allowed_but_unknown_na_is_not(self):
         key = COLUMNS[0][0]
@@ -100,7 +100,7 @@ class GovernanceBadgeTests(unittest.TestCase):
                 report['repositories'][0]['checks'][key] = check
                 generated = self.badges(report)
                 self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-                self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+                self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
 
     def test_not_applicable_cannot_hide_a_failure(self):
         report = deepcopy(self.report)
@@ -108,7 +108,7 @@ class GovernanceBadgeTests(unittest.TestCase):
         report['repositories'][0]['checks'][COLUMNS[0][0]] = {'status': FAIL, 'applicable': False}
         generated = self.badges(report)
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
 
     def test_errors_do_not_change_recent_last_checked_age_band(self):
         report = deepcopy(self.report)
@@ -116,7 +116,7 @@ class GovernanceBadgeTests(unittest.TestCase):
         report['repositories'][0]['errors'] = ['private scanner failure text']
         generated = self.badges(report)
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
-        self.assertEqual(color_for(generated['last-checked.svg']), badges.GREEN)
+        self.assertEqual(color_for(generated['last-checked.svg']), badges.AMBER)
 
     def test_missing_report_and_missing_completed_at_never_fabricate_dates(self):
         for report in (None, {}):
@@ -207,14 +207,15 @@ class GovernanceBadgeTests(unittest.TestCase):
         generated = self.badges(report)
         self.assertEqual(value_for(generated['last-checked.svg']), '2026-10-27 12:00 UTC')
 
-    def test_last_checked_age_bands_are_red_under_three_green_to_eight_amber_from_eight(self):
+    def test_last_checked_age_bands_and_exact_boundaries(self):
         for age, expected in (
-            (timedelta(days=2, hours=23, minutes=59, seconds=59), badges.RED),
-            (timedelta(days=3), badges.GREEN),
-            (timedelta(days=7, hours=23, minutes=59, seconds=59), badges.GREEN),
+            (timedelta(days=2, hours=23, minutes=59, seconds=59), badges.GREEN),
+            (timedelta(days=3), badges.AMBER),
+            (timedelta(days=3, seconds=1), badges.AMBER),
+            (timedelta(days=7, hours=23, minutes=59, seconds=59), badges.AMBER),
             (timedelta(days=8), badges.AMBER),
-            (timedelta(days=8, seconds=1), badges.AMBER),
-            (timedelta(seconds=0), badges.RED),
+            (timedelta(days=8, seconds=1), badges.RED),
+            (timedelta(seconds=0), badges.GREEN),
         ):
             with self.subTest(age=age):
                 report = deepcopy(self.report)

@@ -31,8 +31,8 @@ nor distributes a workflow to other repositories. Initial assets are amber place
 	Uses the existing bot/merge/governance filters and repository exceptions. Work-branch activity cannot
 	reset this age. Missing `develop` or unavailable commit data shows `unknown`, not default-branch age.
 - **Last checked:** actual scan completion time in UTC, not workflow start or badge publication time.
-	The color indicates age regardless of check findings: red when the report is less than three days old,
-	green from three days up to (but not including) eight days, and amber from eight days onward. Missing or
+	The color indicates age regardless of check findings: green when the report is less than three days old,
+	amber from three through eight days inclusive, and red when it is more than eight days old. Missing or
 	invalid timestamps are red. Compliance pass/fail is shown separately.
 
 The existing report still checks governance files and workflows on each repository's default branch;
