@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="230" height="28" viewBox="0 0 230 28" role="img" aria-label="OSPO compliance: not checked">
-  <title>OSPO compliance: not checked</title>
-  <clipPath id="rounded"><rect width="230" height="28" rx="5"/></clipPath>
+<svg xmlns="http://www.w3.org/2000/svg" width="265" height="28" viewBox="0 0 265 28" role="img" aria-label="OSPO compliance: attention needed">
+  <title>OSPO compliance: attention needed</title>
+  <clipPath id="rounded"><rect width="265" height="28" rx="5"/></clipPath>
   <g clip-path="url(#rounded)">
     <path fill="#374151" d="M0 0h129v28H0z"/>
-    <path fill="#9a6700" d="M129 0h101v28H129z"/>
+    <path fill="#9a6700" d="M129 0h136v28H129z"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="12">
     <text x="64.5" y="18">OSPO compliance</text>
-    <text x="179.5" y="18">not checked</text>
+    <text x="197.0" y="18">attention needed</text>
   </g>
 </svg>
