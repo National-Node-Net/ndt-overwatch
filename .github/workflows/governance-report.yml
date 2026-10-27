@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Get repository reader token
         id: reader_token
@@ -75,13 +77,21 @@ jobs:
           owner: ${{ github.repository_owner }}
           permission-contents: write
 
-      - name: Checkout OSPO policies and manifests
+      - name: Checkout OSPO policies and checklists
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: National-Node-Net/ospo-resources
           ref: develop
           token: ${{ steps.reader_token.outputs.token }}
           path: ospo-resources
+
+      - name: Checkout published OSPO workflow baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: National-Node-Net/ospo-resources
+          ref: main
+          token: ${{ steps.reader_token.outputs.token }}
+          path: ospo-workflows
 
       - name: Install Conftest
         env:
@@ -122,7 +132,26 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
             args+=(--post-reminders --reminder-author "$REMINDER_AUTHOR")
           fi
-          python3 tools/governance-report/governance_report.py --source-root ospo-resources "${args[@]}"
+          python3 tools/governance-report/governance_report.py --source-root ospo-resources --workflow-source-root ospo-workflows "${args[@]}"
+
+      - name: Generate this repository's README badges
+        if: ${{ always() && !cancelled() && github.ref == 'refs/heads/feature/governance-report' }}
+        env:
+          BADGE_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 tools/governance-report/governance_badges.py \
+            --report governance-report/report.json \
+            --repository "$BADGE_REPOSITORY" \
+            --output-dir governance-badges
+
+      - name: Upload README badges
+        if: ${{ always() && !cancelled() && github.ref == 'refs/heads/feature/governance-report' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: governance-badges
+          path: governance-badges/*.svg
+          retention-days: 90
+          if-no-files-found: error
 
       - name: Upload governance report
         if: always()
@@ -132,3 +161,48 @@ jobs:
           path: governance-report/
           retention-days: 90
           if-no-files-found: ignore
+
+  publish-readme-badges:
+    needs: governance-report
+    # Feature-branch pilot only. Never publish to main/develop or bypass protection.
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/feature/governance-report' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/governance-report
+
+      - name: Download README badges only
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: governance-badges
+          path: ${{ runner.temp }}/governance-badges
+
+      - name: Publish only SVGs to the unchanged feature branch
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          BADGE_SOURCE: ${{ runner.temp }}/governance-badges
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$SOURCE_SHA" ]]; then
+            echo 'Feature branch moved during the scan; skipping outdated badge publication.'
+            exit 0
+          fi
+          mkdir -p .github/badges
+          for name in ospo-compliance develop-activity last-checked; do
+            cp -- "$BADGE_SOURCE/$name.svg" ".github/badges/$name.svg"
+          done
+          git add -- .github/badges/ospo-compliance.svg .github/badges/develop-activity.svg .github/badges/last-checked.svg
+          if git diff --cached --quiet; then
+            echo 'README badges are unchanged.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore(OSPO): refresh feature-branch governance badges'
+          # GITHUB_TOKEN pushes do not retrigger this push workflow. Never force-push.
+          git push origin HEAD:refs/heads/feature/governance-report

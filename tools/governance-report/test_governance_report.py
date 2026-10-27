@@ -101,7 +101,9 @@ class SbomTests(unittest.TestCase):
         return {'tag_name': tag, 'published_at': iso(days_ago), 'draft': draft, 'assets': [{'name': a} for a in assets]}
 
     def test_no_releases(self):
-        self.assertEqual(gr.check_sbom([self.release('v0', 1, draft=True)], NOW, 90)['status'], gr.NA)
+        check = gr.check_sbom([self.release('v0', 1, draft=True)], NOW, 90)
+        self.assertEqual(check['status'], gr.NA)
+        self.assertIs(check['applicable'], False)
 
     def test_recent_missing(self):
         releases = [self.release('v2', 5), self.release('v1', 10, ['sbom.spdx.json'])]
@@ -295,6 +297,72 @@ class ActivityTests(unittest.TestCase):
         self.assertIsNone(gr.latest_human_commit(commits))
 
 
+class WorkflowSourceTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.source_root = Path(directory.name) / 'develop'
+        self.workflow_root = Path(directory.name) / 'main'
+        for root in (self.source_root, self.workflow_root):
+            (root / '.github/workflows').mkdir(parents=True)
+        self.workflow_path = '.github/workflows/published.yml'
+        (self.source_root / 'oss-checklist-files.txt').write_text('README.md\nLICENSE.md\n')
+        (self.source_root / 'tools/policy-as-code/policy').mkdir(parents=True)
+        (self.source_root / 'organisation-required-workflows.txt').write_text(
+            self.workflow_path + '\n.github/workflows/stale-pr-alerts.yml\n')
+        (self.source_root / self.workflow_path).write_bytes(b'develop workflow\n')
+        (self.source_root / '.github/workflows/stale-pr-alerts.yml').write_bytes(b'develop only\n')
+        (self.workflow_root / 'organisation-required-workflows.txt').write_text(self.workflow_path + '\n')
+        (self.workflow_root / self.workflow_path).write_bytes(b'published main workflow\n')
+        self.args = gr.parse_args(['--org', 'Org', '--source-root', str(self.source_root),
+                                   '--workflow-source-root', str(self.workflow_root)])
+
+    def test_main_manifest_and_hashes_are_independent_of_develop_policy(self):
+        scanner = gr.Scanner(self.args, self.source_root, self.workflow_root)
+        self.assertEqual(scanner.expected_workflows, {
+            'published.yml': gr.git_blob_sha(b'published main workflow\n'),
+        })
+        self.assertNotIn('stale-pr-alerts.yml', scanner.expected_workflows)
+        self.assertEqual(scanner.policy_dir, self.source_root / 'tools/policy-as-code/policy')
+        self.assertEqual(scanner.oss_files, ['README.md', 'LICENSE.md'])
+        main_blobs = {self.workflow_path: gr.git_blob_sha(b'published main workflow\n')}
+        self.assertEqual(gr.check_workflows(main_blobs, scanner.expected_workflows)['status'], gr.OK)
+        develop_blobs = {self.workflow_path: gr.git_blob_sha(b'develop workflow\n')}
+        self.assertEqual(gr.check_workflows(develop_blobs, scanner.expected_workflows)['status'], gr.WARN)
+
+    def test_default_workflow_root_does_not_follow_policy_source_root(self):
+        args = gr.parse_args(['--org', 'Org', '--source-root', str(self.source_root)])
+        self.assertEqual(args.workflow_source_root, Path(gr.__file__).resolve().parents[2] / 'ospo-workflows')
+        self.assertNotEqual(args.workflow_source_root, args.source_root)
+
+    def test_explicit_workflow_root(self):
+        self.assertEqual(self.args.workflow_source_root, self.workflow_root)
+
+    def test_missing_workflow_checkout_aborts_before_api_calls(self):
+        for path in (self.workflow_root / 'missing', self.workflow_root / 'organisation-required-workflows.txt'):
+            with self.subTest(path=path), patch.object(gr, 'gh_api') as api:
+                with self.assertRaisesRegex(SystemExit, 'workflow source checkout does not exist'):
+                    gr.main(['--org', 'Org', '--source-root', str(self.source_root),
+                             '--workflow-source-root', str(path)])
+                api.assert_not_called()
+
+    def test_missing_workflow_manifest_aborts_before_api_calls(self):
+        (self.workflow_root / 'organisation-required-workflows.txt').unlink()
+        with patch.object(gr, 'gh_api') as api:
+            with self.assertRaisesRegex(SystemExit, 'workflow source manifest does not exist'):
+                gr.main(['--org', 'Org', '--source-root', str(self.source_root),
+                         '--workflow-source-root', str(self.workflow_root)])
+            api.assert_not_called()
+
+    def test_missing_listed_workflow_is_not_silently_omitted(self):
+        (self.workflow_root / self.workflow_path).unlink()
+        with patch.object(gr, 'gh_api') as api:
+            with self.assertRaisesRegex(SystemExit, 'Listed OSPO source workflows missing.*published.yml'):
+                gr.main(['--org', 'Org', '--source-root', str(self.source_root),
+                         '--workflow-source-root', str(self.workflow_root)])
+            api.assert_not_called()
+
+
 class OtherCheckTests(unittest.TestCase):
     def test_local_history_scan_uses_reader_token_for_clone_only(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
@@ -345,6 +413,34 @@ class OtherCheckTests(unittest.TestCase):
         with patch.object(gr, 'gh_api', side_effect=gr.ApiError('unavailable')):
             entry = scanner.scan(repo, gr.check_secret_scan(0, error='scanner failed'))
         self.assertIn('secret_scan: scanner failed', entry['errors'])
+
+    def test_scanner_exports_qualified_activity_without_parsing_summary(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        scanner.now = NOW
+        scanner.args = SimpleNamespace(dormant_days=180, release_days=90, dependabot_pr_days=14, human_pr_days=30)
+        scanner.oss_files = []
+        scanner.expected_workflows = {}
+        scanner.pr_token = None
+        repo = {'name': 'ndt-overwatch', 'full_name': 'Org/ndt-overwatch', 'default_branch': 'main',
+                'html_url': 'https://example.invalid/repo', 'visibility': 'public'}
+        for branch in ('develop', 'main'):
+            with self.subTest(branch=branch):
+                activity = {'activityBranch': branch, 'latestHumanCommit': commit(22),
+                            'develop': {'target': {}} if branch == 'develop' else None}
+                def api(endpoint, **kwargs):
+                    if '/git/trees/' in endpoint:
+                        return {'tree': []}
+                    return []
+                with patch.object(gr, 'gh_api', side_effect=api), \
+                        patch.object(scanner, 'repository_activity', return_value=activity), \
+                        patch.object(scanner, 'dependabot_config', return_value=gr.result(gr.OK, 'passed')), \
+                        patch.object(scanner, 'repo_setting', return_value=True), \
+                        patch.object(scanner, 'dependabot_auto_merge', return_value=gr.result(gr.OK, 'passed')), \
+                        patch.object(scanner, 'auto_backmerge', return_value=gr.result(gr.OK, 'passed')), \
+                        patch.object(scanner, 'remind', return_value={}):
+                    entry = scanner.scan(repo, gr.check_secret_scan(0))
+                self.assertEqual(entry['activity'], {'branch': branch, 'last_commit_at': iso(22)})
+                self.assertEqual(entry['errors'], [])
 
     def test_delete_branch(self):
         self.assertEqual(gr.check_delete_branch(None)['status'], gr.NA)
@@ -566,6 +662,7 @@ class OtherCheckTests(unittest.TestCase):
         self.assertIn('Missing file: a\\|b', markdown)
         self.assertIn('Human PR age', markdown)
         self.assertIn('no separate FAIL age threshold is currently configured', markdown)
+        self.assertIn('published on `National-Node-Net/ospo-resources` `main`, not `develop`', markdown)
         self.assertNotIn('Related tools', markdown)
         self.assertNotIn('Not covered by this report', markdown)
         self.assertNotIn('| Repository | Visibility | Default |', markdown)
@@ -578,6 +675,7 @@ class OtherCheckTests(unittest.TestCase):
         self.assertNotIn('The font is inherited from the viewer', dashboard_html)
         self.assertIn('Dependabot GitHub Actions<br>auto-merge workflow', dashboard_html)
         self.assertNotIn('Repository auto-merge enabled', dashboard_html)
+        self.assertIn('published on <code>National-Node-Net/ospo-resources</code> <code>main</code>', dashboard_html)
         legend = dashboard_html.split('<h3>Templates and policy</h3>', 1)[1].split('</ul>', 1)[0]
         self.assertEqual(legend.count('<li>'), 11)
         self.assertNotIn('<p>', legend)

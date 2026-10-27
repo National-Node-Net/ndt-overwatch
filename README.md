@@ -1,5 +1,12 @@
 # README
 
+[![OSPO compliance](.github/badges/ospo-compliance.svg)](tools/governance-report/README.md#feature-branch-readme-badges)
+[![Develop activity](.github/badges/develop-activity.svg)](tools/governance-report/README.md#feature-branch-readme-badges)
+[![Last checked](.github/badges/last-checked.svg)](tools/governance-report/README.md#feature-branch-readme-badges)
+
+These self-hosted badges are a `feature/governance-report` pilot for this repository only. They show
+the latest saved scan, not live results; `not checked` means no scan has populated them yet.
+
 **Repository:** `ndt-overwatch`  
 **Description:** `The ndt-overwatch repository serves as the central hub for executing organisation-wide automations across the National Digital Twin Programme (NDTP). It houses automated workflows and scripts designed to enforce governance standards, gather compliance metrics, and streamline administrative tasks.`  
 **SPDX-License-Identifier:** `Apache-2.0 AND OGL-UK-3.0`

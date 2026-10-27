@@ -315,7 +315,7 @@ def has_sbom(release):
 def check_sbom(releases, now, days):
     published = [r for r in releases if not r.get('draft') and r.get('published_at')]
     if not published:
-        return result(NA, 'no releases')
+        return {**result(NA, 'no releases'), 'applicable': False}
     published.sort(key=lambda r: r['published_at'], reverse=True)
     recent = [r for r in published if age_days(r['published_at'], now) <= days]
     evaluated = recent or published[:1]
@@ -448,17 +448,25 @@ def reminder_body(pr, now):
 
 
 class Scanner:
-    def __init__(self, args, source_root):
+    def __init__(self, args, source_root, workflow_source_root):
+        if not workflow_source_root.is_dir():
+            raise SystemExit(f'OSPO workflow source checkout does not exist: {workflow_source_root}')
+        manifest_path = workflow_source_root / 'organisation-required-workflows.txt'
+        if not manifest_path.is_file():
+            raise SystemExit(f'OSPO workflow source manifest does not exist: {manifest_path}')
+        manifest = read_list_file(manifest_path.read_text())
+        missing = [path for path in manifest if not (workflow_source_root / path).is_file()]
+        if missing:
+            raise SystemExit(f'Listed OSPO source workflows missing from {workflow_source_root}: {", ".join(missing)}')
         self.args = args
         self.org = args.org
         self.now = datetime.now(timezone.utc)
         self.pr_token = os.environ.get('PR_TOKEN') or None
         self.settings_token = os.environ.get('SETTINGS_TOKEN') or None
         self.oss_files = read_list_file((source_root / 'oss-checklist-files.txt').read_text())
-        manifest = read_list_file((source_root / 'organisation-required-workflows.txt').read_text())
         self.expected_workflows = {
-            Path(path).name: git_blob_sha((source_root / path).read_bytes())
-            for path in manifest if (source_root / path).is_file()
+            Path(path).name: git_blob_sha((workflow_source_root / path).read_bytes())
+            for path in manifest
         }
         self.policy_dir = source_root / 'tools/policy-as-code/policy'
         self.conftest = shutil.which('conftest')
@@ -604,6 +612,11 @@ class Scanner:
         def load_activity():
             state['activity'] = self.repository_activity(full, default)
             state['has_develop'] = state['activity'].get('develop') is not None
+            latest = state['activity'].get('latestHumanCommit') or {}
+            entry['activity'] = {
+                'branch': state['activity'].get('activityBranch', default),
+                'last_commit_at': latest.get('committedDate'),
+            }
 
         try:
             load_tree()
@@ -898,6 +911,9 @@ def render_markdown(report):
         f'- **Required governance files for private/internal repositories:** {private_required_files}.',
         '- **Pull request template:** `.github/PULL_REQUEST_TEMPLATE.md`.',
         '- **Issue templates:** `.github/ISSUE_TEMPLATE/bug_report.md` and `.github/ISSUE_TEMPLATE/feature_request.md`.',
+        '- **OSPO workflow synchronization:** compares each repository\'s default branch byte for byte with the workflow manifest '
+        'and workflow files published on `National-Node-Net/ospo-resources` `main`, not `develop`. '
+        'Checklists and Dependabot policy remain sourced separately from `develop`.',
         '- **Dependabot GitHub Actions auto-merge workflow:** checks the latest applicable workflow run and job steps. '
         'OK requires a successful auto-merge enablement step; FAIL means a failed attempt; WARN means running or unconfirmed. '
         'Skipped human PRs and non-GitHub-Actions updates are ignored. Enabling auto-merge is not proof the PR has merged.',
@@ -1020,6 +1036,9 @@ def render_html(report):
         'Human PRs and non-GitHub-Actions update skips are ignored. This does not prove the PR has merged.</li>',
         '<li><strong>AI use:</strong> no AI/LLM is used.</li>',
         '</ul>',
+        '<h3>OSPO workflow synchronization</h3><p>Compares each repository\'s default branch byte for byte with the workflow '
+        'manifest and workflow files published on <code>National-Node-Net/ospo-resources</code> <code>main</code>, '
+        'not <code>develop</code>. Checklists and Dependabot policy remain sourced separately from <code>develop</code>.</p>',
         '</body></html>',
     ])
     return '\n'.join(parts)
@@ -1068,7 +1087,9 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--org', default=os.environ.get('GITHUB_REPOSITORY_OWNER'))
     parser.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[2],
-                        help='Checkout containing OSPO checklists, workflow manifest and policy-as-code.')
+                        help='Checkout containing OSPO checklists and policy-as-code (develop).')
+    parser.add_argument('--workflow-source-root', type=Path, default=Path(__file__).resolve().parents[2] / 'ospo-workflows',
+                        help='Independent ospo-resources main checkout containing the published workflow manifest and files.')
     parser.add_argument('--human-pr-days', type=bounded_int, default=30)
     parser.add_argument('--dependabot-pr-days', type=bounded_int, default=14)
     parser.add_argument('--dormant-days', type=bounded_int, default=180)
@@ -1100,7 +1121,8 @@ def main(argv=None):
     source_root = args.source_root.expanduser().resolve()
     if not source_root.is_dir():
         raise SystemExit(f'OSPO source checkout does not exist: {source_root}')
-    scanner = Scanner(args, source_root)
+    workflow_source_root = args.workflow_source_root.expanduser().resolve()
+    scanner = Scanner(args, source_root, workflow_source_root)
     if not scanner.conftest:
         print('WARNING: conftest not found; Dependabot policy checks will be reported as N/A.', file=sys.stderr)
 
@@ -1119,6 +1141,7 @@ def main(argv=None):
     report = {
         'organisation': args.org,
         'generated_at': scanner.now.strftime('%Y-%m-%d %H:%M'),
+        'completed_at': datetime.now(timezone.utc).isoformat(),
         'mode': 'post reminders' if args.post_reminders else 'report only',
         'parameters': {key: getattr(args, key) for key in ('human_pr_days', 'dependabot_pr_days', 'dormant_days', 'release_days')},
         'skipped': skipped,

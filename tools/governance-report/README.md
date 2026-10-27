@@ -5,7 +5,10 @@ The dashboard includes a summary, separate public and private/internal repositor
 and detailed findings for each repository.
 
 The [workflow](../../.github/workflows/governance-report.yml) runs on pushes to `feature/governance-report` for pre-merge testing, weekly (Monday 07:17 UTC), and on demand.
-It checks out `National-Node-Net/ospo-resources` `develop` to use the centrally maintained file lists, workflow manifest and Dependabot policies.
+It checks out `National-Node-Net/ospo-resources` `develop` into `ospo-resources` for the centrally maintained
+file checklists and Dependabot policies, including groups. An independent checkout of `main` into
+`ospo-workflows` supplies only the published workflow manifest and workflow files for synchronization comparisons.
+Workflows listed only on `develop` (such as `stale-pr-alerts.yml` before publication) are not required by this comparison.
 The Markdown dashboard is shown in the run's job summary. The artifact includes `dashboard.md`,
 `dashboard.html` and `report.json` (kept for 90 days). The HTML dashboard has colored status text and
 a responsive matrix; it inherits the browser font and does not set a font family.
@@ -13,6 +16,41 @@ GitHub job summaries strip inline CSS, so Markdown uses static Shields.io status
 green OK, amber WARN, red FAIL/ERROR, grey N/A. Badge requests contain only fixed status labels and colors,
 not repository names or results. Result descriptions use nested sub/sup markup for two relative size reductions;
 the HTML equivalent uses 75% text. GitHub controls the final Markdown typography, not arbitrary pixel sizes.
+
+## Feature-branch README badges
+
+The root README embeds three SVGs stored in [`.github/badges`](../../.github/badges).
+This pilot writes only to `feature/governance-report`; it neither publishes to `main`/`develop`
+nor distributes a workflow to other repositories. Initial assets are amber placeholders, not demo results.
+
+- **OSPO compliance:** green only when every expected, applicable check passes, no processing errors exist,
+	and the qualifying `develop` commit is within the report's `dormant_days` threshold (currently 180).
+	WARN, FAIL, ERROR, missing checks, or unavailable N/A results stay amber. Only explicitly marked
+	non-applicable N/A checks (currently SBOM when there are no releases) are excluded.
+- **Develop activity:** whole days from the last qualifying human commit on `develop` to scan completion.
+	Uses the existing bot/merge/governance filters and repository exceptions. Work-branch activity cannot
+	reset this age. Missing `develop` or unavailable commit data shows `unknown`, not default-branch age.
+- **Last checked:** actual scan completion time in UTC, not workflow start or badge publication time.
+	Green means checks completed, not that they all passed; incomplete checks keep it amber.
+
+The existing report still checks governance files and workflows on each repository's default branch;
+these badges are results for `ndt-overwatch`, not a claim that the feature-branch tree passed those checks.
+No organisation-wide or private-repository findings are copied into the badge assets.
+
+After the report, `governance_badges.py` generates the images even when the report job reports processing
+errors; errors cannot produce an overall green badge. If no JSON was produced, images show `not checked`.
+A separate job downloads only the three SVGs and uses the repository `GITHUB_TOKEN` with Contents: write
+to commit them to the feature branch. It skips if the branch moved, never force-pushes, and stages no report
+data. GitHub branch rules still apply. The report job remains Contents: read; the settings App token remains
+GET-only. Bot badge commits do not count as human development activity or retrigger the push workflow.
+
+Badges update on the existing feature-branch push runs, not nightly. GitHub scheduled runs use the default
+branch, so scheduling is unchanged for this feature-only pilot. Static SVGs cannot expire or increment age
+when a workflow stops; read the visible timestamp. No new freshness policy is introduced.
+
+`governance_badges.py` also accepts `--report PATH --repository OWNER/NAME --output-dir PATH` locally.
+Omitting `--report` generates the initial placeholders. Existing malformed reports generate placeholders
+and a nonzero exit code; a legacy report without a completion timestamp is not presented as newly checked.
 
 ## Repository exclusions
 
@@ -43,7 +81,7 @@ the HTML equivalent uses 75% text. GitHub controls the final Markdown typography
 | Auto-delete branches | `delete_branch_on_merge` | FAIL if off, N/A if the token cannot see it |
 | Dependabot GitHub Actions auto-merge workflow | Latest applicable `auto-merge-dependabot-pull-requests.yml` run and its job steps; ignores human PR skips and non-GitHub-Actions update skips | OK only if the auto-merge enablement step succeeded; FAIL if missing/failed; WARN if running or unconfirmed; N/A if no applicable run or inaccessible history |
 | Activity | Exact days since the latest qualifying human commit to `develop` (or the default branch); excludes bots, `OSPO` in the subject/body, and governance-only file changes | WARN if over 180 days and no active human work branch |
-| OSPO workflows | Workflows listed in `organisation-required-workflows.txt` exist on each repository's default branch and match this checkout byte for byte | FAIL if missing, WARN if out of sync |
+| OSPO workflows | Workflows listed in `organisation-required-workflows.txt` on `National-Node-Net/ospo-resources` `main` exist on each repository's default branch and match the published `main` workflow files byte for byte | FAIL if missing, WARN if out of sync |
 | Main-to-develop back-merge | Latest actual run of `.github/workflows/auto-back-merge.yml`; skipped runs from closed, unmerged PRs are ignored | OK if passed, FAIL if failed, WARN if running/other conclusion, N/A if no run or Actions history is not visible |
 
 The report's Legend section lists all governance-file and template paths, the Dependabot policy rules,
@@ -112,10 +150,13 @@ only scheduled runs post stale-human-PR reminders.
 
 Requires Python 3, the GitHub CLI authenticated with read access to the organisation, and optionally
 Conftest on `PATH`. Local runs never post comments unless `--post-reminders` is given.
+Prepare separate `ospo-resources` checkouts: `develop` for `--source-root` and published `main` for
+`--workflow-source-root`. The latter defaults to `<report repository root>/ospo-workflows`, never to
+`--source-root`. A missing workflow checkout, manifest, or listed source workflow stops the scan before API calls.
 
 ```bash
-python3 tools/governance-report/governance_report.py --org National-Node-Net --source-root /path/to/ospo-resources --output-dir /tmp/governance-report
-python3 tools/governance-report/governance_report.py --org National-Node-Net --source-root /path/to/ospo-resources --repo node-lib --repo opa-pov
+python3 tools/governance-report/governance_report.py --org National-Node-Net --source-root /path/to/ospo-resources-develop --workflow-source-root /path/to/ospo-resources-main --output-dir /tmp/governance-report
+python3 tools/governance-report/governance_report.py --org National-Node-Net --source-root /path/to/ospo-resources-develop --workflow-source-root /path/to/ospo-resources-main --repo node-lib --repo opa-pov
 python3 -m unittest discover -s tools/governance-report
 ```
 
