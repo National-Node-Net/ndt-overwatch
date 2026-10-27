@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="272" height="28" viewBox="0 0 272 28" role="img" aria-label="Last checked: 2026-10-27 13:17 UTC">
-  <title>Last checked: 2026-10-27 13:17 UTC</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="272" height="28" viewBox="0 0 272 28" role="img" aria-label="Last checked: 2026-10-27 13:37 UTC">
+  <title>Last checked: 2026-10-27 13:37 UTC</title>
   <clipPath id="rounded"><rect width="272" height="28" rx="5"/></clipPath>
   <g clip-path="url(#rounded)">
     <path fill="#374151" d="M0 0h108v28H0z"/>
-    <path fill="#cf222e" d="M108 0h164v28H108z"/>
+    <path fill="#1a7f37" d="M108 0h164v28H108z"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="12">
     <text x="54.0" y="18">Last checked</text>
-    <text x="190.0" y="18">2026-10-27 13:17 UTC</text>
+    <text x="190.0" y="18">2026-10-27 13:37 UTC</text>
   </g>
 </svg>
