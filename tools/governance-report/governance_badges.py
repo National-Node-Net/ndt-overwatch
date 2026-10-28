@@ -16,8 +16,8 @@ from governance_report import COLUMNS, ERROR, NA, OK, STATUSES
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
 RED = '#cf222e'
-LAST_CHECKED_GREEN_AFTER = timedelta(days=3)
-LAST_CHECKED_AMBER_AFTER = timedelta(days=8)
+LAST_CHECKED_GREEN_LIMIT = timedelta(days=3)
+LAST_CHECKED_AMBER_LIMIT = timedelta(days=8)
 BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
 REPORT_KEYS = ('organisation', 'generated_at', 'mode', 'parameters', 'skipped', 'excluded', 'legend', 'repositories')
 OWNER_PATTERN = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]*\Z')
@@ -160,7 +160,7 @@ def _check_state(repository):
             continue
         status = check.get('status')
         applicable = check.get('applicable', True)
-        if (status == NA and applicable is False):
+        if status == NA and applicable is False:
             continue
         if status not in STATUSES or status == NA or applicable is not True:
             complete = False
@@ -172,7 +172,8 @@ def _check_state(repository):
         if status != OK:
             all_pass = False
     if repository['errors']:
-        complete = all_pass = False
+        complete = False
+        all_pass = False
     return complete, all_pass and applicable_count > 0
 
 
@@ -187,7 +188,7 @@ def _develop_age(repository, completed_at):
 
 
 def generate_badges(report, repository, now=None):
-    """Return the three fixed SVG badges for OWNER/NAME; unknown data stays amber."""
+    """Generate the three SVG badges for OWNER/NAME from a report snapshot."""
     current_time = now if now is not None else datetime.now(timezone.utc)
     parsed_repository = repository if isinstance(repository, tuple) else None
     if parsed_repository is None:
@@ -216,9 +217,9 @@ def generate_badges(report, repository, now=None):
     checks_complete, checks_pass = _check_state(target)
     checked_text = completed_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     report_age = current_time - completed_at
-    if report_age < LAST_CHECKED_GREEN_AFTER:
+    if report_age < LAST_CHECKED_GREEN_LIMIT:
         last_checked_color = GREEN
-    elif report_age <= LAST_CHECKED_AMBER_AFTER:
+    elif report_age <= LAST_CHECKED_AMBER_LIMIT:
         last_checked_color = AMBER
     else:
         last_checked_color = RED
@@ -268,8 +269,10 @@ def main(argv=None):
     if report is not None:
         completed_at = _report_completed_at(report, current_time)
         has_completion_timestamp = report.get('completed_at') is not None
-        invalid = report['organisation'].casefold() != args.repository[0].casefold()
-        invalid |= has_completion_timestamp and completed_at is None
+        invalid = (
+            report['organisation'].casefold() != args.repository[0].casefold()
+            or (has_completion_timestamp and completed_at is None)
+        )
 
     badges = generate_badges(report, args.repository, current_time)
     args.output_dir.mkdir(parents=True, exist_ok=True)
