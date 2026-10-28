@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="216" height="28" viewBox="0 0 216 28" role="img" aria-label="Develop activity: 232 days">
+  <title>Develop activity: 232 days</title>
+  <clipPath id="rounded"><rect width="216" height="28" rx="5"/></clipPath>
+  <g clip-path="url(#rounded)">
+    <path fill="#374151" d="M0 0h136v28H0z"/>
+    <path fill="#9a6700" d="M136 0h80v28H136z"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="12">
+    <text x="68.0" y="18">Develop activity</text>
+    <text x="176.0" y="18">232 days</text>
+  </g>
+</svg>
