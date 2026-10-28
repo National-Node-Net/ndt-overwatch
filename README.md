@@ -1,11 +1,12 @@
 # README
 
-[![OSPO compliance](.github/badges/ospo-compliance.svg)](tools/governance-report/README.md#feature-branch-readme-badges)
-[![Develop activity](.github/badges/develop-activity.svg)](tools/governance-report/README.md#feature-branch-readme-badges)
-[![Last checked](.github/badges/last-checked.svg)](tools/governance-report/README.md#feature-branch-readme-badges)
+[![OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges/ospo-compliance.svg)](tools/governance-report/README.md#readme-badges)
+[![Develop activity](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges/develop-activity.svg)](tools/governance-report/README.md#readme-badges)
+[![Last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges/last-checked.svg)](tools/governance-report/README.md#readme-badges)
 
-These self-hosted badges are a `feature/governance-report` pilot for this repository only. They show
-the latest saved scan, not live results; `not checked` means no scan has populated them yet.
+These self-hosted badges are published to the `sync/governance-badges` branch. Their README links are stable;
+report runs update the SVGs on that branch without creating recurring commits to `main` or changing this README.
+They show the latest saved scan, not live results; `not checked` means no scan has populated them yet.
 
 **Repository:** `ndt-overwatch`  
 **Description:** `The ndt-overwatch repository serves as the central hub for executing organisation-wide automations across the National Digital Twin Programme (NDTP). It houses automated workflows and scripts designed to enforce governance standards, gather compliance metrics, and streamline administrative tasks.`  

@@ -36,7 +36,11 @@ def report_fixture():
             'name': NAME,
             'checks': checks,
             'errors': [],
-            'activity': {'branch': 'develop', 'last_commit_at': (NOW - timedelta(days=22)).isoformat()},
+            'activity': {
+                'branch': 'develop',
+                'last_commit_at': (NOW - timedelta(days=1)).isoformat(),
+                'last_application_commit_at': (NOW - timedelta(days=22)).isoformat(),
+            },
         }],
     }
 
@@ -151,9 +155,9 @@ class GovernanceBadgeTests(unittest.TestCase):
     def test_missing_no_develop_or_future_develop_commit_is_unknown(self):
         for activity in (
             None,
-            {'branch': 'develop', 'last_commit_at': None},
-            {'branch': 'develop', 'last_commit_at': 'bad-date'},
-            {'branch': 'develop', 'last_commit_at': (NOW + timedelta(seconds=1)).isoformat()},
+            {'branch': 'develop', 'last_application_commit_at': None},
+            {'branch': 'develop', 'last_application_commit_at': 'bad-date'},
+            {'branch': 'develop', 'last_application_commit_at': (NOW + timedelta(seconds=1)).isoformat()},
         ):
             with self.subTest(activity=activity):
                 report = deepcopy(self.report)
@@ -179,24 +183,42 @@ class GovernanceBadgeTests(unittest.TestCase):
         for age, expected in ((180, badges.GREEN), (181, badges.AMBER), (0, badges.GREEN)):
             with self.subTest(age=age):
                 report = deepcopy(self.report)
-                report['repositories'][0]['activity']['last_commit_at'] = (NOW - timedelta(days=age)).isoformat()
+                report['repositories'][0]['activity']['last_application_commit_at'] = (NOW - timedelta(days=age)).isoformat()
                 generated = self.badges(report)
                 self.assertEqual(color_for(generated['develop-activity.svg']), expected)
                 self.assertEqual(color_for(generated['ospo-compliance.svg']), expected)
 
     def test_old_develop_is_not_rescued_by_other_recent_work(self):
         report = deepcopy(self.report)
-        report['repositories'][0]['activity']['last_commit_at'] = (NOW - timedelta(days=181)).isoformat()
+        report['repositories'][0]['activity']['last_application_commit_at'] = (NOW - timedelta(days=181)).isoformat()
         report['repositories'][0]['checks']['activity']['status'] = OK
         report['repositories'][0]['other_branch_commit_at'] = NOW.isoformat()
         generated = self.badges(report)
         self.assertEqual(value_for(generated['develop-activity.svg']), '181 days')
         self.assertEqual(color_for(generated['ospo-compliance.svg']), badges.AMBER)
 
+    def test_newer_governance_activity_does_not_reset_application_activity(self):
+        report = deepcopy(self.report)
+        report['repositories'][0]['activity']['last_commit_at'] = (NOW - timedelta(days=1)).isoformat()
+        report['repositories'][0]['activity']['last_application_commit_at'] = (
+            NOW - timedelta(days=22)
+        ).isoformat()
+        generated = self.badges(report)
+        self.assertEqual(value_for(generated['develop-activity.svg']), '22 days')
+
+    def test_general_activity_timestamp_is_not_used_as_badge_fallback(self):
+        report = deepcopy(self.report)
+        report['repositories'][0]['activity'] = {
+            'branch': 'develop',
+            'last_commit_at': (NOW - timedelta(days=1)).isoformat(),
+        }
+        generated = self.badges(report)
+        self.assertEqual(value_for(generated['develop-activity.svg']), 'unknown')
+
     def test_scan_time_is_used_as_snapshot_for_activity_age(self):
         report = deepcopy(self.report)
         report['completed_at'] = (NOW - timedelta(days=10)).isoformat()
-        report['repositories'][0]['activity']['last_commit_at'] = (NOW - timedelta(days=190)).isoformat()
+        report['repositories'][0]['activity']['last_application_commit_at'] = (NOW - timedelta(days=190)).isoformat()
         generated = self.badges(report)
         self.assertEqual(value_for(generated['develop-activity.svg']), '180 days')
         self.assertEqual(color_for(generated['develop-activity.svg']), badges.GREEN)
@@ -278,10 +300,10 @@ class GovernanceBadgeTests(unittest.TestCase):
     def test_readme_links_resolve_to_valid_saved_badges(self):
         root = Path(badges.__file__).resolve().parents[2]
         readme = (root / 'README.md').read_text(encoding='utf-8')
+        published_base = 'https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges'
         for filename in badges.BADGE_FILENAMES:
-            relative = f'.github/badges/{filename}'
-            self.assertIn(f']({relative})', readme)
-            svg = ET.parse(root / relative).getroot()
+            self.assertIn(f']({published_base}/{filename})', readme)
+            svg = ET.parse(root / '.github' / 'badges' / filename).getroot()
             self.assertEqual(svg.tag, f'{NAMESPACE}svg')
             self.assertEqual(svg.attrib['role'], 'img')
             self.assertIsNotNone(svg.find(f'{NAMESPACE}title'))
@@ -295,7 +317,7 @@ class GovernanceBadgeTests(unittest.TestCase):
             cli_report = deepcopy(self.report)
             cli_now = datetime.now(timezone.utc)
             cli_report['completed_at'] = cli_now.isoformat()
-            cli_report['repositories'][0]['activity']['last_commit_at'] = (
+            cli_report['repositories'][0]['activity']['last_application_commit_at'] = (
                 cli_now - timedelta(days=22)
             ).isoformat()
             report_path.write_text(json.dumps(cli_report), encoding='utf-8')

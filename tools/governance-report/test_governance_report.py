@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
+from xml.etree import ElementTree as ET
 
 import governance_report as gr
 
@@ -144,7 +145,8 @@ class ActivityTests(unittest.TestCase):
                     node = {**commit(2, message=message), 'oid': 'governance-' + message}
                     with patch.object(gr, 'gh_api', return_value={'files': [{'filename': '.github/workflows/ci.yml'}]}):
                         self.assertTrue(scanner.commit_counts_as_activity('Org/' + name, node))
-                    self.assertTrue(gr.is_activity_commit(node))
+                    self.assertTrue(gr.is_activity_commit(node, include_governance_activity=True))
+                    self.assertEqual(gr.is_activity_commit(node), 'ospo' not in message.casefold())
 
     def test_governance_repositories_still_exclude_bots_and_merges(self):
         scanner = self.scanner()
@@ -157,6 +159,27 @@ class ActivityTests(unittest.TestCase):
                 self.assertFalse(scanner.commit_counts_as_activity('Org/ospo-resources', node))
         api.assert_not_called()
 
+    def test_application_activity_excludes_ospo_governance_bot_and_merge_commits(self):
+        scanner = self.scanner()
+        application = {**commit(7, message='feat: update application code'), 'oid': 'application'}
+        governance = {**commit(1, message='docs: update governance workflow'), 'oid': 'governance'}
+        ospo = {**commit(2, message='chore(OSPO): refresh policy'), 'oid': 'ospo'}
+        dependabot = {**commit(3, login='dependabot[bot]', message='build(deps): update'), 'oid': 'dependabot'}
+        merge = {**commit(4, message='Merge application release'), 'oid': 'merge', 'parents': {'totalCount': 2}}
+        history = {'nodes': [governance, ospo, dependabot, merge, application], 'pageInfo': {'hasNextPage': False}}
+        with patch.object(gr, 'gh_api', side_effect=[
+                {'files': [{'filename': '.github/workflows/ci.yml'}]},
+                {'files': [{'filename': 'src/application.py'}]},
+        ]) as api:
+            latest_application = scanner.latest_project_commit(
+                'Org/ndt-overwatch', 'develop', history, include_governance_activity=False)
+        self.assertEqual(latest_application['oid'], 'application')
+        self.assertEqual(api.call_count, 2)
+
+        with patch.object(gr, 'gh_api', return_value={'files': [{'filename': '.github/workflows/ci.yml'}]}):
+            latest_governance_activity = scanner.latest_project_commit('Org/ndt-overwatch', 'develop', history)
+        self.assertEqual(latest_governance_activity['oid'], 'governance')
+
     def test_governance_exception_applies_to_age_and_branch_activity(self):
         scanner = self.scanner()
         node = {**commit(3, message='feat(OSPO): update governance'), 'oid': 'ospo-work'}
@@ -164,6 +187,7 @@ class ActivityTests(unittest.TestCase):
             self.assertTrue(scanner.commit_counts_as_activity('Org/ndt-overwatch', node))
         activity = self.activity([node], [{'name': 'feature/governance', 'target': node}])
         activity['latestHumanCommit'] = node
+        activity['includeGovernanceActivity'] = True
         check = gr.check_activity(activity, NOW, 180)
         self.assertEqual(check['status'], gr.OK)
         self.assertIn('3 days since last commit on develop', check['summary'])
@@ -177,7 +201,9 @@ class ActivityTests(unittest.TestCase):
             self.assertFalse(scanner.commit_counts_as_activity('Org/repo', node))
             self.assertFalse(scanner.commit_counts_as_activity('Org/repo', dict(node)))
         self.assertEqual(api.call_count, 1)
-        self.assertTrue(node['governanceOnly'])
+        self.assertNotIn('governanceOnly', node)
+        self.assertNotIn('includeGovernanceActivity', node)
+        self.assertFalse(scanner._activity_commit_cache[('Org/repo', 'abc', False)])
 
     def test_bot_and_ospo_commits_do_not_request_file_diffs(self):
         scanner = self.scanner()
@@ -426,6 +452,7 @@ class OtherCheckTests(unittest.TestCase):
         for branch in ('develop', 'main'):
             with self.subTest(branch=branch):
                 activity = {'activityBranch': branch, 'latestHumanCommit': commit(22),
+                            'latestApplicationCommit': commit(70),
                             'develop': {'target': {}} if branch == 'develop' else None}
                 def api(endpoint, **kwargs):
                     if '/git/trees/' in endpoint:
@@ -439,7 +466,11 @@ class OtherCheckTests(unittest.TestCase):
                         patch.object(scanner, 'auto_backmerge', return_value=gr.result(gr.OK, 'passed')), \
                         patch.object(scanner, 'remind', return_value={}):
                     entry = scanner.scan(repo, gr.check_secret_scan(0))
-                self.assertEqual(entry['activity'], {'branch': branch, 'last_commit_at': iso(22)})
+                self.assertEqual(entry['activity'], {
+                    'branch': branch,
+                    'last_commit_at': iso(22),
+                    'last_application_commit_at': iso(70),
+                })
                 self.assertEqual(entry['errors'], [])
 
     def test_delete_branch(self):
@@ -569,13 +600,15 @@ class OtherCheckTests(unittest.TestCase):
             self.assertNotIn('internal-repo', public_section)
 
     def test_status_badges_are_colored_without_inline_css(self):
+        badge_root = Path(gr.__file__).resolve().parents[2] / '.github' / 'badges'
         for status, color in gr.STATUS_COLORS.items():
             with self.subTest(status=status):
                 badge = gr.markdown_status(status)
-                self.assertIn(color.lstrip('#'), badge)
                 self.assertIn('![' + status + ']', badge)
-                self.assertNotIn('style="', badge)
-                self.assertNotIn('<span', badge)
+                self.assertIn(f'{gr.STATUS_BADGE_BASE_URL}/{gr.STATUS_BADGE_FILES[status]}', badge)
+                self.assertNotIn('shields.io', badge)
+                svg = ET.parse(badge_root / gr.STATUS_BADGE_FILES[status]).getroot()
+                self.assertEqual(svg.find('{http://www.w3.org/2000/svg}rect').attrib['fill'], color)
 
     def test_trufflehog_output_counts_without_retaining_credentials(self):
         repos = [{'name': 'repo-a', 'full_name': 'Org/repo-a'}]

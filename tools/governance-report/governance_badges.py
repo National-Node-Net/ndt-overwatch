@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
-from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN
+from governance_report import COLUMNS, ERROR, NA, OK, STATUSES
 
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
@@ -155,14 +155,16 @@ def _check_state(repository):
     for key, _title in COLUMNS:
         check = checks.get(key)
         if not isinstance(check, dict):
-            complete = all_pass = False
+            complete = False
+            all_pass = False
             continue
         status = check.get('status')
         applicable = check.get('applicable', True)
         if (status == NA and applicable is False):
             continue
         if status not in STATUSES or status == NA or applicable is not True:
-            complete = all_pass = False
+            complete = False
+            all_pass = False
             continue
         applicable_count += 1
         if status == ERROR:
@@ -178,7 +180,7 @@ def _develop_age(repository, completed_at):
     activity = repository.get('activity')
     if not isinstance(activity, dict) or activity.get('branch') != 'develop':
         return None
-    committed = _timestamp(activity.get('last_commit_at'))
+    committed = _timestamp(activity.get('last_application_commit_at'))
     if committed is None or committed > completed_at:
         return None
     return (completed_at - committed).days
@@ -265,12 +267,9 @@ def main(argv=None):
     current_time = datetime.now(timezone.utc)
     if report is not None:
         completed_at = _report_completed_at(report, current_time)
-        if report['organisation'].casefold() != args.repository[0].casefold() or (
-                report.get('completed_at') is not None and completed_at is None):
-            invalid = True
-        # A present but malformed scan timestamp is not a trustworthy report snapshot.
-        if report.get('completed_at') is not None and _timestamp(report.get('completed_at')) is None:
-            invalid = True
+        has_completion_timestamp = report.get('completed_at') is not None
+        invalid = report['organisation'].casefold() != args.repository[0].casefold()
+        invalid |= has_completion_timestamp and completed_at is None
 
     badges = generate_badges(report, args.repository, current_time)
     args.output_dir.mkdir(parents=True, exist_ok=True)

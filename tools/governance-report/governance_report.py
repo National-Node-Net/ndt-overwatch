@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 DEPENDABOT = 'dependabot[bot]'
 DEFAULT_EXCLUSIONS_FILE = Path(__file__).with_name('excluded-repositories.txt')
@@ -42,6 +42,17 @@ TRANSIENT_ERROR = re.compile(r'EOF|timeout|connection reset|HTTP 5\d\d', re.IGNO
 OK, WARN, FAIL, NA, ERROR = 'OK', 'WARN', 'FAIL', 'N/A', 'ERROR'
 STATUSES = [OK, WARN, FAIL, NA, ERROR]
 STATUS_COLORS = {OK: '#1a7f37', WARN: '#9a6700', FAIL: '#cf222e', NA: '#6e7781', ERROR: '#cf222e'}
+STATUS_BADGE_BASE_URL = (
+    'https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/'
+    'sync/governance-badges/.github/badges'
+)
+STATUS_BADGE_FILES = {
+    OK: 'status-ok.svg',
+    WARN: 'status-warn.svg',
+    FAIL: 'status-fail.svg',
+    NA: 'status-na.svg',
+    ERROR: 'status-error.svg',
+}
 
 COLUMNS = [
     ('develop', 'Develop branch'),
@@ -79,13 +90,53 @@ GRAPHQL_ACTIVITY = '''
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     develop: ref(qualifiedName: "refs/heads/develop") {
-            target { ... on Commit { history(first: 100) { nodes { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
+            target {
+                ... on Commit {
+                    history(first: 100) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
     }
     defaultBranchRef {
-            target { ... on Commit { history(first: 100) { nodes { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
+            target {
+                ... on Commit {
+                    history(first: 100) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
     }
     refs(refPrefix: "refs/heads/", first: 100, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
-    nodes { name target { ... on Commit { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } } }
+            nodes {
+                name
+                target {
+                    ... on Commit {
+                        oid
+                        committedDate
+                        messageHeadline
+                        messageBody
+                        parents(first: 2) { totalCount }
+                        author { name user { login __typename } }
+                    }
+                }
+            }
     }
   }
 }
@@ -95,8 +146,22 @@ GRAPHQL_HISTORY_PAGE = '''
 query($owner: String!, $name: String!, $branch: String!, $after: String) {
     repository(owner: $owner, name: $name) {
         ref(qualifiedName: $branch) {
-            target { ... on Commit { history(first: 100, after: $after) { nodes { oid committedDate messageHeadline messageBody parents(first: 2) { totalCount } author { name user { login __typename } } } pageInfo { hasNextPage endCursor } } } }
+            target {
+                ... on Commit {
+                    history(first: 100, after: $after) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
         }
+            }
+    }
     }
 }
 '''
@@ -168,18 +233,18 @@ def is_bot_author(author):
     return user.get('__typename') == 'Bot' or login.endswith('[bot]') or name.endswith('[bot]')
 
 
-def is_automation_commit(commit):
-    message = f'{commit.get("messageHeadline") or ""}\n{commit.get("messageBody") or ""}'.casefold()
-    return is_bot_author(commit.get('author')) or ('ospo' in message and not commit.get('includeGovernanceActivity', False))
-
-
 def is_governance_only(paths, patterns):
     return bool(paths) and all(any(fnmatchcase(path, pattern) for pattern in patterns) for path in paths)
 
 
-def is_activity_commit(commit):
-    return (not is_automation_commit(commit) and not commit.get('governanceOnly', False)
-            and (commit.get('parents') or {}).get('totalCount', 0) < 2)
+def is_activity_commit(commit, *, include_governance_activity=False):
+    if is_bot_author(commit.get('author')):
+        return False
+    if not include_governance_activity:
+        message = f'{commit.get("messageHeadline") or ""}\n{commit.get("messageBody") or ""}'.casefold()
+        if 'ospo' in message:
+            return False
+    return (commit.get('parents') or {}).get('totalCount', 0) < 2
 
 
 def is_bot_user(user):
@@ -357,9 +422,11 @@ def check_dependabot_auto_merge(workflow_run, jobs):
 def check_activity(activity, now, days):
     develop = activity.get('develop')
     branch_name = 'develop' if develop else activity.get('activityBranch', 'default branch')
+    include_governance_activity = activity.get('includeGovernanceActivity', False)
     source = develop or activity.get('defaultBranchRef') or {}
     history = (((source.get('target') or {}).get('history')) or {}).get('nodes', [])
-    latest_human = activity.get('latestHumanCommit') or latest_human_commit(history)
+    latest_human = activity.get('latestHumanCommit') or latest_human_commit(
+        history, include_governance_activity=include_governance_activity)
     days_since_human = age_days(latest_human['committedDate'], now) if latest_human else None
     since = now - timedelta(days=days)
     active_branches = [
@@ -367,7 +434,8 @@ def check_activity(activity, now, days):
         if node['name'].startswith(WORK_BRANCH_PREFIXES)
         and (node.get('target') or {}).get('committedDate')
         and parse_time(node['target']['committedDate']) >= since
-        and is_activity_commit(node['target'])
+        and is_activity_commit(
+            node['target'], include_governance_activity=include_governance_activity)
     ]
     human_activity_recent = days_since_human is not None and days_since_human <= days
     activity_summary = (
@@ -384,8 +452,11 @@ def check_activity(activity, now, days):
     )
 
 
-def latest_human_commit(commits):
-    human = [commit for commit in commits if is_activity_commit(commit)]
+def latest_human_commit(commits, *, include_governance_activity=False):
+    human = [
+        commit for commit in commits
+        if is_activity_commit(commit, include_governance_activity=include_governance_activity)
+    ]
     return max(human, key=lambda commit: commit['committedDate']) if human else None
 
 
@@ -613,9 +684,11 @@ class Scanner:
             state['activity'] = self.repository_activity(full, default)
             state['has_develop'] = state['activity'].get('develop') is not None
             latest = state['activity'].get('latestHumanCommit') or {}
+            latest_application = state['activity'].get('latestApplicationCommit') or {}
             entry['activity'] = {
                 'branch': state['activity'].get('activityBranch', default),
                 'last_commit_at': latest.get('committedDate'),
+                'last_application_commit_at': latest_application.get('committedDate'),
             }
 
         try:
@@ -653,14 +726,14 @@ class Scanner:
         run('human_prs', lambda: check_human_prs(prs, self.now, self.args.human_pr_days, self.remind(full, prs, entry)))
         return entry
 
-    def commit_counts_as_activity(self, full, commit):
-        include_governance = full.split('/', 1)[1].casefold() in self.governance_activity_repositories
-        commit['includeGovernanceActivity'] = include_governance
-        if include_governance:
-            commit['governanceOnly'] = False
-        if not is_activity_commit(commit):
+    def commit_counts_as_activity(self, full, commit, *, include_governance_activity=None):
+        include_governance = (
+            full.split('/', 1)[1].casefold() in self.governance_activity_repositories
+            if include_governance_activity is None else include_governance_activity
+        )
+        if not is_activity_commit(commit, include_governance_activity=include_governance):
             return False
-        key = (full, commit['oid'])
+        key = (full, commit['oid'], include_governance)
         if key not in self._activity_commit_cache:
             page = 1
             paths = []
@@ -673,7 +746,8 @@ class Scanner:
                     paths.append(file['filename'])
                     if file.get('previous_filename'):
                         paths.append(file['previous_filename'])
-                if paths and (include_governance or not is_governance_only(paths, self.governance_paths)):
+                is_application_change = paths and not is_governance_only(paths, self.governance_paths)
+                if paths and (include_governance or is_application_change):
                     self._activity_commit_cache[key] = True
                     break
                 if len(files) < 100:
@@ -682,16 +756,16 @@ class Scanner:
                 if page >= 30:
                     raise ApiError('Commit file list reaches GitHub limit; cannot classify governance-only activity')
                 page += 1
-        commit['governanceOnly'] = not self._activity_commit_cache[key]
         return self._activity_commit_cache[key]
 
-    def latest_project_commit(self, full, branch, history, since=None):
+    def latest_project_commit(self, full, branch, history, since=None, *, include_governance_activity=None):
         while True:
             nodes = sorted(history.get('nodes', []), key=lambda node: node['committedDate'], reverse=True)
             for node in nodes:
                 if since and parse_time(node['committedDate']) < since:
                     continue
-                if self.commit_counts_as_activity(full, node):
+                if self.commit_counts_as_activity(
+                    full, node, include_governance_activity=include_governance_activity):
                     return node
             page_info = history.get('pageInfo') or {}
             if not page_info.get('hasNextPage'):
@@ -715,8 +789,17 @@ class Scanner:
         source = activity.get('develop') or activity.get('defaultBranchRef') or {}
         branch = 'develop' if activity.get('develop') else default
         activity['activityBranch'] = branch
+        repository_name = full.split('/', 1)[1].casefold()
+        include_governance_activity = repository_name in self.governance_activity_repositories
+        activity['includeGovernanceActivity'] = include_governance_activity
         history = ((source.get('target') or {}).get('history')) or {}
-        activity['latestHumanCommit'] = self.latest_project_commit(full, branch, history)
+        activity['latestHumanCommit'] = self.latest_project_commit(
+            full, branch, history, include_governance_activity=include_governance_activity)
+        if include_governance_activity:
+            activity['latestApplicationCommit'] = self.latest_project_commit(
+                full, branch, history, include_governance_activity=False)
+        else:
+            activity['latestApplicationCommit'] = activity['latestHumanCommit']
         since = self.now - timedelta(days=self.args.dormant_days)
         for work_branch in (activity.get('refs') or {}).get('nodes', []):
             tip = work_branch.get('target')
@@ -821,8 +904,7 @@ def cell(text):
 
 
 def markdown_status(status):
-    color = STATUS_COLORS[status].lstrip('#')
-    return f'![{status}](https://img.shields.io/badge/{quote(status, safe="")}-{color}?style=flat)'
+    return f'![{status}]({STATUS_BADGE_BASE_URL}/{STATUS_BADGE_FILES[status]})'
 
 
 def repository_groups(repositories):
@@ -947,7 +1029,10 @@ def render_html(report):
     args = report['parameters']
     repos = report['repositories']
     legend = report.get('legend', {})
-    esc = lambda value: html.escape(str(value), quote=True)
+
+    def esc(value):
+        return html.escape(str(value), quote=True)
+
     parts = [
         '<!doctype html>', '<html lang="en">', '<head>', '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
