@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="202" height="28" viewBox="0 0 202 28" role="img" aria-label="OSPO compliance: unknown">
+  <title>OSPO compliance: unknown</title>
+  <clipPath id="rounded"><rect width="202" height="28" rx="5"/></clipPath>
+  <g clip-path="url(#rounded)">
+    <path fill="#374151" d="M0 0h129v28H0z"/>
+    <path fill="#6e7781" d="M129 0h73v28H129z"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="12">
+    <text x="64.5" y="18">OSPO compliance</text>
+    <text x="165.5" y="18">unknown</text>
+  </g>
+</svg>
