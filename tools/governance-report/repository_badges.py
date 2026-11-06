@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta, timezone
 from html import escape
 from pathlib import Path
 
-from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN, safe_output_directory
+from governance_report import COLUMNS, ERROR, FAIL, NA, STATUSES, WARN, safe_output_directory
 
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
@@ -94,41 +94,27 @@ def _badge_svg(label, value, color):
 '''
 
 
+def _check_status(check):
+    if not isinstance(check, dict):
+        return 'unknown'
+    status = check.get('status')
+    applicable = check.get('applicable', True)
+    if not isinstance(applicable, bool):
+        return 'unknown'
+    if status == NA and applicable is False:
+        return None
+    if applicable is False or status not in STATUSES or status in (NA, ERROR):
+        return 'unknown'
+    return status
+
+
 def _compliance(repository):
-    unknown = bool(repository.get('errors'))
-    attention = False
-    applicable_count = 0
     checks = repository['checks']
-
-    for key, _title in COLUMNS:
-        check = checks.get(key)
-        if not isinstance(check, dict):
-            unknown = True
-            continue
-        status = check.get('status')
-        applicable = check.get('applicable', True)
-        if not isinstance(applicable, bool):
-            unknown = True
-            continue
-        if status == NA and applicable is False:
-            continue
-        if status not in STATUSES or applicable is False:
-            unknown = True
-            continue
-        if status == NA:
-            unknown = True
-            continue
-        applicable_count += 1
-        if status == ERROR:
-            unknown = True
-        elif status in (WARN, FAIL):
-            attention = True
-        elif status != OK:
-            unknown = True
-
-    if unknown or applicable_count == 0:
+    statuses = [_check_status(checks.get(key)) for key, _title in COLUMNS]
+    known_statuses = [status for status in statuses if status is not None]
+    if repository.get('errors') or 'unknown' in known_statuses or not known_statuses:
         return 'unknown', GRAY
-    if attention:
+    if any(status in (WARN, FAIL) for status in known_statuses):
         return 'attention needed', AMBER
     return 'all checks passed', GREEN
 
@@ -193,7 +179,11 @@ def generate_badges(report, now=None):
 def write_badges(report, output_dir, now=None):
     """Replace OUTPUT/repositories with generated SVGs and return the badge map."""
     badges = generate_badges(report, now=now)
-    repositories_dir = Path(output_dir) / 'repositories'
+    try:
+        output_root = safe_output_directory(output_dir)
+    except argparse.ArgumentTypeError as exc:
+        raise InvalidReport('badge output directory is outside the working directory') from exc
+    repositories_dir = output_root / 'repositories'
     if repositories_dir.is_symlink():
         raise InvalidReport
     if repositories_dir.exists():

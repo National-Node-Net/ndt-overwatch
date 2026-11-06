@@ -193,7 +193,8 @@ class OutputTests(unittest.TestCase):
             stale = output / 'repositories' / 'stale-repo' / 'old.svg'
             stale.parent.mkdir(parents=True)
             stale.write_text('<svg/>', encoding='utf-8')
-            result = rb.write_badges(make_report(repositories), output, NOW)
+            with patch.object(rb.Path, 'cwd', return_value=output):
+                result = rb.write_badges(make_report(repositories), output, NOW)
             self.assertEqual(len(result), 2)
             files = sorted(path.relative_to(output).as_posix() for path in output.rglob('*') if path.is_file())
             self.assertEqual(len(files), 6)
@@ -204,9 +205,24 @@ class OutputTests(unittest.TestCase):
     def test_invalid_repository_name_is_rejected_before_output(self):
         report = make_report([make_repository('../escape')])
         with tempfile.TemporaryDirectory() as temporary_directory:
-            with self.assertRaises(rb.InvalidReport):
-                rb.write_badges(report, temporary_directory, NOW)
+            with patch.object(rb.Path, 'cwd', return_value=Path(temporary_directory)):
+                with self.assertRaises(rb.InvalidReport):
+                    rb.write_badges(report, 'output', NOW)
             self.assertFalse((Path(temporary_directory) / 'repositories').exists())
+
+    def test_write_badges_rejects_output_traversal_and_symlink_escape(self):
+        report = make_report([make_repository()])
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            outside = root.parent / f'{root.name}-outside'
+            outside.mkdir()
+            self.addCleanup(outside.rmdir)
+            (root / 'escape').symlink_to(outside, target_is_directory=True)
+            with patch.object(rb.Path, 'cwd', return_value=root):
+                for output in ('../outside', 'escape/badges', str(outside)):
+                    with self.subTest(output=output), self.assertRaises(rb.InvalidReport):
+                        rb.write_badges(report, output, NOW)
+            self.assertFalse((outside / 'repositories').exists())
 
     def test_invalid_report_fails_generation(self):
         with self.assertRaises(rb.InvalidReport):

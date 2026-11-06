@@ -288,6 +288,26 @@ def check_dependabot_config(config_path, failures, evaluated=True):
     return result(OK, 'policy passed')
 
 
+def _parse_trufflehog_finding(line):
+    try:
+        finding = json.loads(line)
+    except json.JSONDecodeError:
+        raise ValueError('Malformed scanner JSON') from None
+    if not isinstance(finding, dict):
+        raise ValueError('Malformed scanner result')
+    return finding
+
+
+def _trufflehog_repository(finding, names, repositories, local_repository):
+    git = (((finding.get('SourceMetadata') or {}).get('Data') or {}).get('Git') or {})
+    repository_url = git.get('repository') or ''
+    path = urlparse(repository_url).path.strip('/').removesuffix('.git').lower()
+    repo_name = names.get(path)
+    if local_repository and len(repositories) == 1 and repository_url.startswith('file://'):
+        return repositories[0]['name']
+    return repo_name
+
+
 def parse_trufflehog_output(output, repositories, *, local_repository=False):
     names = {repo['full_name'].lower(): repo['name'] for repo in repositories}
     counts = {repo['name']: 0 for repo in repositories}
@@ -295,20 +315,10 @@ def parse_trufflehog_output(output, repositories, *, local_repository=False):
     for line in output.splitlines():
         if not line.strip():
             continue
-        try:
-            finding = json.loads(line)
-        except json.JSONDecodeError:
-            raise ValueError('Malformed scanner JSON') from None
-        if not isinstance(finding, dict):
-            raise ValueError('Malformed scanner result')
+        finding = _parse_trufflehog_finding(line)
         if finding.get('Verified') is not True:
             continue
-        git = (((finding.get('SourceMetadata') or {}).get('Data') or {}).get('Git') or {})
-        repository_url = git.get('repository') or ''
-        path = urlparse(repository_url).path.strip('/').removesuffix('.git').lower()
-        repo_name = names.get(path)
-        if local_repository and len(repositories) == 1 and repository_url.startswith('file://'):
-            repo_name = repositories[0]['name']
+        repo_name = _trufflehog_repository(finding, names, repositories, local_repository)
         if repo_name:
             counts[repo_name] += 1
         else:
@@ -667,171 +677,214 @@ class Scanner:
                 subprocess.run(['docker', 'rm', '-f', container_name], capture_output=True, timeout=30)
 
     def scan(self, repo, secret_result):
-        name = repo['name']
-        full = repo['full_name']
-        default = repo['default_branch']
+        entry = self._new_scan_entry(repo, secret_result)
+        try:
+            state = self._load_scan_state(repo, entry)
+        except (ApiError, subprocess.TimeoutExpired, KeyError, TypeError) as exc:
+            self._mark_scan_incomplete(entry, exc)
+            return entry
+        self._run_repository_checks(repo, state, entry)
+        self._run_pull_request_checks(repo, state, entry)
+        return entry
+
+    @staticmethod
+    def _new_scan_entry(repo, secret_result):
         entry = {
-            'name': name, 'url': repo['html_url'], 'visibility': repo.get('visibility', 'unknown'),
-            'default_branch': default, 'fork': repo.get('fork', False), 'checks': {}, 'errors': [],
+            'name': repo['name'], 'url': repo['html_url'], 'visibility': repo.get('visibility', 'unknown'),
+            'default_branch': repo['default_branch'], 'fork': repo.get('fork', False),
+            'checks': {'secret_scan': secret_result}, 'errors': [],
         }
-        checks = entry['checks']
-        checks['secret_scan'] = secret_result
         if secret_result['status'] in (ERROR, NA):
             entry['errors'].append(f'secret_scan: {secret_result["summary"]}')
+        return entry
 
-        def run(key, func):
-            try:
-                checks[key] = func()
-            except (ApiError, subprocess.TimeoutExpired, KeyError, ValueError) as exc:
-                checks[key] = result(ERROR, 'error', [str(exc)[:300]])
-                entry['errors'].append(f'{key}: {str(exc)[:300]}')
+    def _load_scan_state(self, repo, entry):
+        full = repo['full_name']
+        default = repo['default_branch']
+        tree = gh_api(f'repos/{full}/git/trees/{default}?recursive=1')
+        blobs = {item['path']: item['sha'] for item in tree['tree'] if item['type'] == 'blob'}
+        if tree.get('truncated'):
+            entry['errors'].append('tree: listing truncated, file checks may be incomplete')
+        activity = self.repository_activity(full, default)
+        latest = activity.get('latestHumanCommit') or {}
+        latest_application = activity.get('latestApplicationCommit') or {}
+        entry['activity'] = {
+            'branch': activity.get('activityBranch', default),
+            'last_commit_at': latest.get('committedDate'),
+            'last_application_commit_at': latest_application.get('committedDate'),
+        }
+        return {'blobs': blobs, 'activity': activity, 'has_develop': activity.get('develop') is not None}
 
-        state = {}
+    @staticmethod
+    def _mark_scan_incomplete(entry, exc):
+        entry['errors'].append(f'scan: {str(exc)[:300]}')
+        for key, _ in COLUMNS:
+            if key != 'secret_scan':
+                entry['checks'][key] = result(ERROR, 'not scanned')
 
-        def load_tree():
-            tree = gh_api(f'repos/{full}/git/trees/{default}?recursive=1')
-            state['blobs'] = {item['path']: item['sha'] for item in tree['tree'] if item['type'] == 'blob'}
-            if tree.get('truncated'):
-                entry['errors'].append('tree: listing truncated, file checks may be incomplete')
-
-        def load_activity():
-            state['activity'] = self.repository_activity(full, default)
-            state['has_develop'] = state['activity'].get('develop') is not None
-            latest = state['activity'].get('latestHumanCommit') or {}
-            latest_application = state['activity'].get('latestApplicationCommit') or {}
-            entry['activity'] = {
-                'branch': state['activity'].get('activityBranch', default),
-                'last_commit_at': latest.get('committedDate'),
-                'last_application_commit_at': latest_application.get('committedDate'),
-            }
-
+    @staticmethod
+    def _run_check(entry, key, func):
         try:
-            load_tree()
-            load_activity()
-        except (ApiError, subprocess.TimeoutExpired, KeyError, TypeError) as exc:
-            entry['errors'].append(f'scan: {str(exc)[:300]}')
-            for key, _ in COLUMNS:
-                if key != 'secret_scan':
-                    checks[key] = result(ERROR, 'not scanned')
-            return entry
+            entry['checks'][key] = func()
+        except (ApiError, subprocess.TimeoutExpired, KeyError, ValueError) as exc:
+            entry['checks'][key] = result(ERROR, 'error', [str(exc)[:300]])
+            entry['errors'].append(f'{key}: {str(exc)[:300]}')
 
+    def _run_repository_checks(self, repo, state, entry):
+        full = repo['full_name']
+        default = repo['default_branch']
         blobs = state['blobs']
         paths = set(blobs)
-        run('develop', lambda: check_develop(default, state['has_develop']))
-        run('files', lambda: check_required_paths(
+        self._run_check(entry, 'develop', lambda: check_develop(default, state['has_develop']))
+        self._run_check(entry, 'files', lambda: check_required_paths(
             paths, self.oss_files if repo.get('visibility') == 'public' else self.inner_source_files(), 'file'))
-        run('templates', lambda: check_required_paths(paths, TEMPLATE_FILES, 'template'))
-        run('dependabot_config', lambda: self.dependabot_config(full, default, paths, state['has_develop']))
-        run('sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
-        run('delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
-        run('dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
-        run('activity', lambda: check_activity(state['activity'], self.now, self.args.dormant_days))
-        run('workflows', lambda: check_workflows(blobs, self.expected_workflows))
-        run('auto_backmerge', lambda: self.auto_backmerge(full, paths))
+        self._run_check(entry, 'templates', lambda: check_required_paths(paths, TEMPLATE_FILES, 'template'))
+        self._run_check(entry, 'dependabot_config', lambda: self.dependabot_config(full, default, paths, state['has_develop']))
+        self._run_check(entry, 'sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
+        self._run_check(entry, 'delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
+        self._run_check(entry, 'dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
+        self._run_check(entry, 'activity', lambda: check_activity(state['activity'], self.now, self.args.dormant_days))
+        self._run_check(entry, 'workflows', lambda: check_workflows(blobs, self.expected_workflows))
+        self._run_check(entry, 'auto_backmerge', lambda: self.auto_backmerge(full, paths))
 
+    def _run_pull_request_checks(self, repo, state, entry):
+        full = repo['full_name']
         try:
             prs = gh_api(f'repos/{full}/pulls?state=open&per_page=100', token=self.pr_token, paginate=True)
         except (ApiError, subprocess.TimeoutExpired) as exc:
             for key in ('dependabot_prs', 'human_prs'):
-                checks[key] = result(ERROR, 'error', [str(exc)[:300]])
+                entry['checks'][key] = result(ERROR, 'error', [str(exc)[:300]])
             entry['errors'].append(f'pulls: {str(exc)[:300]}')
-            return entry
-        run('dependabot_prs', lambda: check_dependabot_prs(prs, self.now, self.args.dependabot_pr_days))
-        run('human_prs', lambda: check_human_prs(prs, self.now, self.args.human_pr_days, self.remind(full, prs, entry)))
-        return entry
+            return
+        self._run_check(entry, 'dependabot_prs', lambda: check_dependabot_prs(prs, self.now, self.args.dependabot_pr_days))
+        self._run_check(entry, 'human_prs', lambda: check_human_prs(
+            prs, self.now, self.args.human_pr_days, self.remind(full, prs, entry)))
 
     def commit_counts_as_activity(self, full, commit, *, include_governance_activity=None):
-        include_governance = (
-            full.split('/', 1)[1].casefold() in self.governance_activity_repositories
-            if include_governance_activity is None else include_governance_activity
-        )
+        include_governance = self.includes_governance_activity(full, include_governance_activity)
         if not is_activity_commit(commit, include_governance_activity=include_governance):
             return False
         key = (full, commit['oid'], include_governance)
         if key not in self._activity_commit_cache:
-            page = 1
-            paths = []
-            while True:
-                response = gh_api(f'repos/{full}/commits/{commit["oid"]}?per_page=100&page={page}')
-                if 'files' not in response:
-                    raise ApiError('Commit file list unavailable; cannot classify activity')
-                files = response['files']
-                for file in files:
-                    paths.append(file['filename'])
-                    if file.get('previous_filename'):
-                        paths.append(file['previous_filename'])
-                is_application_change = paths and not is_governance_only(paths, self.governance_paths)
-                if paths and (include_governance or is_application_change):
-                    self._activity_commit_cache[key] = True
-                    break
-                if len(files) < 100:
-                    self._activity_commit_cache[key] = False
-                    break
-                if page >= 30:
-                    raise ApiError('Commit file list reaches GitHub limit; cannot classify governance-only activity')
-                page += 1
+            self._activity_commit_cache[key] = self._commit_has_activity_paths(
+                full, commit['oid'], include_governance)
         return self._activity_commit_cache[key]
+
+    def includes_governance_activity(self, full, include_governance_activity):
+        if include_governance_activity is not None:
+            return include_governance_activity
+        return full.split('/', 1)[1].casefold() in self.governance_activity_repositories
+
+    def _commit_has_activity_paths(self, full, oid, include_governance_activity):
+        page = 1
+        paths = []
+        while True:
+            response = gh_api(f'repos/{full}/commits/{oid}?per_page=100&page={page}')
+            if 'files' not in response:
+                raise ApiError('Commit file list unavailable; cannot classify activity')
+            files = response['files']
+            self._append_commit_paths(paths, files)
+            if paths and self._commit_paths_are_activity(paths, include_governance_activity):
+                return True
+            if len(files) < 100:
+                return False
+            if page >= 30:
+                raise ApiError('Commit file list reaches GitHub limit; cannot classify governance-only activity')
+            page += 1
+
+    @staticmethod
+    def _append_commit_paths(paths, files):
+        for file in files:
+            paths.append(file['filename'])
+            if file.get('previous_filename'):
+                paths.append(file['previous_filename'])
+
+    def _commit_paths_are_activity(self, paths, include_governance_activity):
+        return include_governance_activity or not is_governance_only(paths, self.governance_paths)
 
     def latest_project_commit(self, full, branch, history, since=None, *, include_governance_activity=None):
         while True:
-            nodes = sorted(history.get('nodes', []), key=lambda node: node['committedDate'], reverse=True)
-            for node in nodes:
-                if since and parse_time(node['committedDate']) < since:
-                    continue
-                if self.commit_counts_as_activity(
-                    full, node, include_governance_activity=include_governance_activity):
-                    return node
-            page_info = history.get('pageInfo') or {}
-            if not page_info.get('hasNextPage'):
+            commit = self._latest_project_commit_in_page(
+                full, history, since, include_governance_activity)
+            if commit:
+                return commit
+            history = self._next_project_history_page(full, branch, history, since)
+            if history is None:
                 return None
-            if since and nodes and max(parse_time(node['committedDate']) for node in nodes) < since:
-                return None
-            data = gh_api('graphql', fields={
-                'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
-                'branch': f'refs/heads/{branch}', 'after': page_info['endCursor'],
-            })
-            ref = data['data']['repository']['ref']
-            if ref is None:
-                raise ApiError('Activity branch disappeared during history scan')
-            history = ref['target']['history']
+
+    def _latest_project_commit_in_page(self, full, history, since, include_governance_activity):
+        nodes = sorted(history.get('nodes', []), key=lambda node: node['committedDate'], reverse=True)
+        for node in nodes:
+            if since and parse_time(node['committedDate']) < since:
+                continue
+            if self.commit_counts_as_activity(
+                full, node, include_governance_activity=include_governance_activity):
+                return node
+        return None
+
+    def _next_project_history_page(self, full, branch, history, since):
+        page_info = history.get('pageInfo') or {}
+        if not page_info.get('hasNextPage'):
+            return None
+        nodes = history.get('nodes', [])
+        if since and nodes and max(parse_time(node['committedDate']) for node in nodes) < since:
+            return None
+        data = gh_api('graphql', fields={
+            'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
+            'branch': f'refs/heads/{branch}', 'after': page_info['endCursor'],
+        })
+        ref = data['data']['repository']['ref']
+        if ref is None:
+            raise ApiError('Activity branch disappeared during history scan')
+        return ref['target']['history']
 
     def repository_activity(self, full, default):
         data = gh_api('graphql', fields={
             'query': GRAPHQL_ACTIVITY, 'owner': self.org, 'name': full.split('/', 1)[1],
         })
         activity = data['data']['repository']
-        source = activity.get('develop') or activity.get('defaultBranchRef') or {}
-        branch = 'develop' if activity.get('develop') else default
+        branch, source = self.activity_source(activity, default)
+        include_governance_activity = self.includes_governance_activity(full, None)
         activity['activityBranch'] = branch
-        repository_name = full.split('/', 1)[1].casefold()
-        include_governance_activity = repository_name in self.governance_activity_repositories
         activity['includeGovernanceActivity'] = include_governance_activity
-        history = ((source.get('target') or {}).get('history')) or {}
+        history = (source.get('target') or {}).get('history') or {}
         activity['latestHumanCommit'] = self.latest_project_commit(
             full, branch, history, include_governance_activity=include_governance_activity)
-        if include_governance_activity:
-            activity['latestApplicationCommit'] = self.latest_project_commit(
-                full, branch, history, include_governance_activity=False)
-        else:
-            activity['latestApplicationCommit'] = activity['latestHumanCommit']
+        activity['latestApplicationCommit'] = self.latest_application_commit(
+            full, branch, history, include_governance_activity, activity['latestHumanCommit'])
+        self.update_work_branch_activity(full, activity)
+        return activity
+
+    @staticmethod
+    def activity_source(activity, default):
+        develop = activity.get('develop')
+        return ('develop', develop) if develop else (default, activity.get('defaultBranchRef') or {})
+
+    def latest_application_commit(self, full, branch, history, include_governance_activity, latest_human):
+        if not include_governance_activity:
+            return latest_human
+        return self.latest_project_commit(full, branch, history, include_governance_activity=False)
+
+    def update_work_branch_activity(self, full, activity):
         since = self.now - timedelta(days=self.args.dormant_days)
         for work_branch in (activity.get('refs') or {}).get('nodes', []):
-            tip = work_branch.get('target')
-            if not tip or not work_branch['name'].startswith(WORK_BRANCH_PREFIXES):
-                continue
-            if parse_time(tip['committedDate']) < since:
-                continue
-            if not self.commit_counts_as_activity(full, tip):
-                data = gh_api('graphql', fields={
-                    'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
-                    'branch': f'refs/heads/{work_branch["name"]}',
-                })
-                ref = data['data']['repository']['ref']
-                if ref is None:
-                    raise ApiError('Work branch disappeared during activity scan')
-                latest = self.latest_project_commit(full, work_branch['name'], ref['target']['history'], since)
-                work_branch['target'] = latest
-        return activity
+            self.update_work_branch(full, work_branch, since)
+
+    def update_work_branch(self, full, work_branch, since):
+        tip = work_branch.get('target')
+        if not tip or not work_branch['name'].startswith(WORK_BRANCH_PREFIXES):
+            return
+        if parse_time(tip['committedDate']) < since or self.commit_counts_as_activity(full, tip):
+            return
+        data = gh_api('graphql', fields={
+            'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
+            'branch': f'refs/heads/{work_branch["name"]}',
+        })
+        ref = data['data']['repository']['ref']
+        if ref is None:
+            raise ApiError('Work branch disappeared during activity scan')
+        work_branch['target'] = self.latest_project_commit(
+            full, work_branch['name'], ref['target']['history'], since)
 
     def dependabot_config(self, full, default, paths, has_develop):
         config_path = next((path for path in DEPENDABOT_CONFIGS if path in paths), None)
