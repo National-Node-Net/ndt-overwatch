@@ -35,6 +35,10 @@ jobs:
         ${{ (github.event_name == 'pull_request' && steps.changes.outputs.scripts == 'true') ||
          github.event_name == 'workflow_dispatch' ||
          (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'develop')) }}
+      run_governance_report_tests: >-
+        ${{ (github.event_name == 'pull_request' && steps.changes.outputs.governance_report == 'true') ||
+         github.event_name == 'workflow_dispatch' ||
+         (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'develop')) }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -48,6 +52,8 @@ jobs:
           filters: |
             scripts:
               - 'scripts/**'
+            governance_report:
+              - 'tools/governance-report/**'
 
   test-scripts:
     permissions:
@@ -98,6 +104,52 @@ jobs:
           name: test-report
           path: test-results/
 
+  test-governance-report:
+    permissions:
+      contents: read
+
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_governance_report_tests == 'true'
+
+    name: Governance Report Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Install coverage tool
+        run: python -m pip install --disable-pip-version-check -r tools/governance-report/requirements-test.txt
+
+      - name: Run tests and generate Python coverage
+        run: |
+          set +e
+          mkdir -p test-results
+          pushd tools/governance-report
+          coverage run --branch --source=governance_report,repository_badges \
+            -m unittest discover -s . -p 'test_*.py'
+          test_status=$?
+          coverage xml -o "$GITHUB_WORKSPACE/test-results/python-coverage.xml"
+          coverage_status=$?
+          popd
+          if [[ "$test_status" -ne 0 ]]; then
+            exit "$test_status"
+          fi
+          exit "$coverage_status"
+
+      - name: Upload Python coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-governance-report
+          path: test-results/python-coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
   publish-results:
     permissions:
       contents: read
@@ -105,6 +157,7 @@ jobs:
 
     needs:
       - test-scripts
+      - test-governance-report
 
     if: always()
 
@@ -133,6 +186,7 @@ jobs:
 
             const hasUnit = fs.existsSync('test-results/test-results.xml');
             const hasCoverage = fs.existsSync('test-results/lcov.info');
+            const hasPythonCoverage = fs.existsSync('test-results/python-coverage.xml');
 
             core.setOutput('unit-reports', hasUnit);
             core.setOutput('coverage-reports', hasCoverage);
@@ -140,6 +194,9 @@ jobs:
             // Check for coverage report
             if (hasCoverage) {
               args.push('-Dsonar.javascript.lcov.reportPaths=test-results/lcov.info');
+            }
+            if (hasPythonCoverage) {
+              args.push('-Dsonar.python.coverage.reportPaths=test-results/python-coverage.xml');
             }
 
             // Join with spaces and set as output

@@ -361,7 +361,12 @@ def check_dependabot_prs(prs, now, stale_days):
     if very_old:
         summary += f', {len(very_old)} >{VERY_OLD_DEPENDABOT_DAYS}d'
     details = [f'Dependabot PR #{pr["number"]} open {ages[pr["number"]]} days: {pr["title"]}' for pr in stale]
-    status = FAIL if very_old else WARN if stale else OK
+    if very_old:
+        status = FAIL
+    elif stale:
+        status = WARN
+    else:
+        status = OK
     return result(status, summary, details)
 
 
@@ -684,7 +689,7 @@ class Scanner:
             self._mark_scan_incomplete(entry, exc)
             return entry
         self._run_repository_checks(repo, state, entry)
-        self._run_pull_request_checks(repo, state, entry)
+        self._run_pull_request_checks(repo, entry)
         return entry
 
     @staticmethod
@@ -747,7 +752,7 @@ class Scanner:
         self._run_check(entry, 'workflows', lambda: check_workflows(blobs, self.expected_workflows))
         self._run_check(entry, 'auto_backmerge', lambda: self.auto_backmerge(full, paths))
 
-    def _run_pull_request_checks(self, repo, state, entry):
+    def _run_pull_request_checks(self, repo, entry):
         full = repo['full_name']
         try:
             prs = gh_api(f'repos/{full}/pulls?state=open&per_page=100', token=self.pr_token, paginate=True)

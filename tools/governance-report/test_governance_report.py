@@ -68,11 +68,9 @@ class ApiTests(unittest.TestCase):
         sleep.assert_called_once_with(2)
 
         failure = SimpleNamespace(returncode=1, stdout='', stderr='HTTP 500')
-        with (
-            patch.object(gr.subprocess, 'run', return_value=failure) as run,
-            patch.object(gr.time, 'sleep') as sleep,
-            self.assertRaises(gr.ApiError),
-        ):
+        with patch.object(gr.subprocess, 'run', return_value=failure) as run, \
+            patch.object(gr.time, 'sleep') as sleep, \
+            self.assertRaises(gr.ApiError):
             gr.gh_api('write', method='POST')
         run.assert_called_once()
         sleep.assert_not_called()
@@ -319,9 +317,8 @@ class ActivityTests(unittest.TestCase):
 
     def test_incomplete_commit_diff_is_not_counted_as_activity(self):
         scanner = self.scanner()
-        with patch.object(gr, 'gh_api', return_value={}) as api:
-            with self.assertRaises(gr.ApiError):
-                scanner.commit_counts_as_activity('Org/repo', {**commit(2), 'oid': 'incomplete'})
+        with patch.object(gr, 'gh_api', return_value={}) as api, self.assertRaises(gr.ApiError):
+            scanner.commit_counts_as_activity('Org/repo', {**commit(2), 'oid': 'incomplete'})
         api.assert_called_once()
 
     def test_history_pages_past_governance_to_project_commit(self):

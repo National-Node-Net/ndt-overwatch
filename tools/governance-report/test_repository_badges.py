@@ -205,9 +205,9 @@ class OutputTests(unittest.TestCase):
     def test_invalid_repository_name_is_rejected_before_output(self):
         report = make_report([make_repository('../escape')])
         with tempfile.TemporaryDirectory() as temporary_directory:
-            with patch.object(rb.Path, 'cwd', return_value=Path(temporary_directory)):
-                with self.assertRaises(rb.InvalidReport):
-                    rb.write_badges(report, 'output', NOW)
+            with patch.object(rb.Path, 'cwd', return_value=Path(temporary_directory)), \
+                    self.assertRaises(rb.InvalidReport):
+                rb.write_badges(report, 'output', NOW)
             self.assertFalse((Path(temporary_directory) / 'repositories').exists())
 
     def test_write_badges_rejects_output_traversal_and_symlink_escape(self):

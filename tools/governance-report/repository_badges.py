@@ -180,8 +180,10 @@ def write_badges(report, output_dir, now=None):
     """Replace OUTPUT/repositories with generated SVGs and return the badge map."""
     badges = generate_badges(report, now=now)
     try:
-        output_root = safe_output_directory(output_dir)
-    except argparse.ArgumentTypeError as exc:
+        working_directory = Path.cwd().resolve()
+        output_root = Path(output_dir).expanduser().resolve()
+        output_root.relative_to(working_directory)
+    except (OSError, RuntimeError, ValueError) as exc:
         raise InvalidReport('badge output directory is outside the working directory') from exc
     repositories_dir = output_root / 'repositories'
     if repositories_dir.is_symlink():
