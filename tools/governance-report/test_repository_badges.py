@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 import governance_report as gr
@@ -225,10 +226,12 @@ class OutputTests(unittest.TestCase):
             output = Path(temporary_directory) / 'badges'
             report_path.write_text(json.dumps(make_report([make_repository('private-repo', 'private')])), encoding='utf-8')
             stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                self.assertEqual(rb.main(['--report', str(report_path), '--output-dir', str(output)]), 0)
+            with patch.object(rb.Path, 'cwd', return_value=Path(temporary_directory)), \
+                    contextlib.redirect_stdout(stdout):
+                self.assertEqual(rb.main(['--report', str(report_path), '--output-dir', 'badges']), 0)
             self.assertEqual(stdout.getvalue(), 'Generated badges for 1 repositories.\n')
             self.assertNotIn('private-repo', stdout.getvalue())
+            self.assertTrue((output / 'repositories/private-repo/ospo-compliance.svg').is_file())
 
 
 if __name__ == '__main__':

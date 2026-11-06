@@ -32,6 +32,76 @@ def commit(days_ago, name='Alice', login='alice', message='', body=''):
     }
 
 
+class ApiTests(unittest.TestCase):
+    def test_api_builds_command_and_decodes_json(self):
+        response = SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr='')
+        with patch.object(gr.subprocess, 'run', return_value=response) as run:
+            value = gr.gh_api('repos/Org/repo', token='reader-token', method='POST',
+                              body={'state': 'open'}, fields={'per_page': 10})
+        self.assertEqual(value, {'ok': True})
+        command = run.call_args.args[0]
+        self.assertEqual(command, [
+            'gh', 'api', 'repos/Org/repo', '--method', 'POST', '--input', '-', '-f', 'per_page=10',
+        ])
+        self.assertEqual(run.call_args.kwargs['input'], '{"state": "open"}')
+        self.assertEqual(run.call_args.kwargs['env']['GH_TOKEN'], 'reader-token')
+
+    def test_api_raw_and_paginated_responses(self):
+        responses = [
+            SimpleNamespace(returncode=0, stdout='raw text', stderr=''),
+            SimpleNamespace(returncode=0, stdout='{"id": 1}\n{"id": 2}\n', stderr=''),
+            SimpleNamespace(returncode=0, stdout='', stderr=''),
+        ]
+        with patch.object(gr.subprocess, 'run', side_effect=responses):
+            self.assertEqual(gr.gh_api('raw', raw=True), 'raw text')
+            self.assertEqual(gr.gh_api('paged', paginate=True), [{'id': 1}, {'id': 2}])
+            self.assertIsNone(gr.gh_api('empty'))
+
+    def test_api_retries_transient_reads_but_not_writes(self):
+        responses = [
+            SimpleNamespace(returncode=1, stdout='', stderr='HTTP 500'),
+            SimpleNamespace(returncode=0, stdout='{}', stderr=''),
+        ]
+        with patch.object(gr.subprocess, 'run', side_effect=responses) as run, patch.object(gr.time, 'sleep') as sleep:
+            self.assertEqual(gr.gh_api('read'), {})
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+        failure = SimpleNamespace(returncode=1, stdout='', stderr='HTTP 500')
+        with patch.object(gr.subprocess, 'run', return_value=failure) as run, patch.object(gr.time, 'sleep') as sleep:
+            with self.assertRaises(gr.ApiError):
+                gr.gh_api('write', method='POST')
+        run.assert_called_once()
+        sleep.assert_not_called()
+
+
+class UtilityTests(unittest.TestCase):
+    def test_parse_time_accepts_z_and_offsets(self):
+        self.assertEqual(gr.parse_time('2026-10-12T12:00:00Z'), NOW)
+        self.assertEqual(gr.parse_time('2026-10-12T14:00:00+02:00'), NOW)
+        with self.assertRaises(ValueError):
+            gr.parse_time('not-a-timestamp')
+
+    def test_bot_author_detection(self):
+        self.assertTrue(gr.is_bot_author({'user': {'__typename': 'Bot'}}))
+        self.assertTrue(gr.is_bot_author({'user': {'login': 'automation[bot]'}}))
+        self.assertTrue(gr.is_bot_author({'name': 'automation[bot]'}))
+        self.assertFalse(gr.is_bot_author({'user': {'login': 'alice'}, 'name': 'Alice'}))
+
+    def test_safe_output_directory_rejects_traversal_and_external_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root.parent / f'{root.name}-outside'
+            outside.mkdir()
+            self.addCleanup(outside.rmdir)
+            (root / 'escape').symlink_to(outside, target_is_directory=True)
+            with patch.object(gr.Path, 'cwd', return_value=root):
+                self.assertEqual(gr.safe_output_directory('reports/current'), root / 'reports/current')
+                for value in ('../outside', str(outside), 'escape/reports'):
+                    with self.subTest(value=value), self.assertRaises(gr.argparse.ArgumentTypeError):
+                        gr.safe_output_directory(value)
+
+
 class DevelopTests(unittest.TestCase):
     def test_present(self):
         self.assertEqual(gr.check_develop('main', True)['status'], gr.OK)
@@ -394,6 +464,28 @@ class WorkflowSourceTests(unittest.TestCase):
                 gr.main(['--org', 'Org', '--source-root', str(self.source_root),
                          '--workflow-source-root', str(self.workflow_root)])
             api.assert_not_called()
+
+    def test_main_writes_report_to_safe_relative_directory(self):
+        def fake_api(endpoint, **kwargs):
+            if endpoint.startswith('orgs/'):
+                return []
+            if endpoint.endswith('inner-source-checklist-files.txt'):
+                return 'README.md\n'
+            raise AssertionError(f'unexpected API endpoint: {endpoint}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            with patch.object(gr.Path, 'cwd', return_value=output_root), \
+                    patch.object(gr, 'gh_api', side_effect=fake_api):
+                status = gr.main([
+                    '--org', 'Org', '--source-root', str(self.source_root),
+                    '--workflow-source-root', str(self.workflow_root), '--output-dir', 'reports/current',
+                ])
+            output_dir = output_root / 'reports/current'
+            self.assertEqual(status, 0)
+            self.assertTrue((output_dir / 'report.json').is_file())
+            self.assertTrue((output_dir / 'dashboard.md').is_file())
+            self.assertTrue((output_dir / 'dashboard.html').is_file())
 
 
 class OtherCheckTests(unittest.TestCase):

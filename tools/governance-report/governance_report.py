@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 DEPENDABOT = 'dependabot[bot]'
+BOT_SUFFIX = '[bot]'
 DEFAULT_EXCLUSIONS_FILE = Path(__file__).with_name('excluded-repositories.txt')
 GOVERNANCE_PATHS_FILE = Path(__file__).with_name('governance-only-paths.txt')
 GOVERNANCE_ACTIVITY_REPOSITORIES_FILE = Path(__file__).with_name('governance-activity-repositories.txt')
@@ -174,6 +175,18 @@ class ApiError(Exception):
 
 
 def gh_api(endpoint, *, token=None, paginate=False, method=None, body=None, raw=False, fields=None):
+    command = _gh_api_command(endpoint, paginate=paginate, method=method, body=body, raw=raw, fields=fields)
+    response, message = _run_gh_api(command, token=token, body=body, attempts=1 if method else 3)
+    if response.returncode != 0:
+        raise ApiError(f'{endpoint}: {message}')
+    if raw:
+        return response.stdout
+    if paginate:
+        return [json.loads(line) for line in response.stdout.splitlines() if line.strip()]
+    return json.loads(response.stdout) if response.stdout.strip() else None
+
+
+def _gh_api_command(endpoint, *, paginate, method, body, raw, fields):
     command = ['gh', 'api', endpoint]
     if raw:
         command += ['-H', 'Accept: application/vnd.github.raw']
@@ -185,27 +198,23 @@ def gh_api(endpoint, *, token=None, paginate=False, method=None, body=None, raw=
         command += ['--input', '-']
     for key, value in (fields or {}).items():
         command += ['-f', f'{key}={value}']
+    return command
+
+
+def _run_gh_api(command, *, token, body, attempts):
     env = dict(os.environ)
     if token:
         env['GH_TOKEN'] = token
     # Writes are never retried, so a reminder cannot be posted twice.
-    attempts = 1 if method else 3
     for attempt in range(attempts):
-        result = subprocess.run(
+        response = subprocess.run(
             command, input=json.dumps(body) if body is not None else None,
             text=True, capture_output=True, timeout=60, env=env,
         )
-        message = (result.stderr or result.stdout).strip()
-        if result.returncode == 0 or not TRANSIENT_ERROR.search(message) or attempt == attempts - 1:
-            break
+        message = (response.stderr or response.stdout).strip()
+        if response.returncode == 0 or attempt + 1 == attempts or not TRANSIENT_ERROR.search(message):
+            return response, message
         time.sleep(2 * (attempt + 1))
-    if result.returncode != 0:
-        raise ApiError(f'{endpoint}: {message}')
-    if raw:
-        return result.stdout
-    if paginate:
-        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 def parse_time(value):
@@ -221,7 +230,7 @@ def result(status, summary, details=None):
 
 
 def git_blob_sha(data):
-    return hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+    return hashlib.sha1(b'blob %d\0' % len(data) + data, usedforsecurity=False).hexdigest()
 
 
 def read_list_file(text):
@@ -232,7 +241,7 @@ def is_bot_author(author):
     user = (author or {}).get('user') or {}
     login = (user.get('login') or '').lower()
     name = ((author or {}).get('name') or '').lower()
-    return user.get('__typename') == 'Bot' or login.endswith('[bot]') or name.endswith('[bot]')
+    return user.get('__typename') == 'Bot' or login.endswith(BOT_SUFFIX) or name.endswith(BOT_SUFFIX)
 
 
 def is_governance_only(paths, patterns):
@@ -250,7 +259,7 @@ def is_activity_commit(commit, *, include_governance_activity=False):
 
 
 def is_bot_user(user):
-    return (user or {}).get('type') == 'Bot' or ((user or {}).get('login') or '').endswith('[bot]')
+    return (user or {}).get('type') == 'Bot' or ((user or {}).get('login') or '').endswith(BOT_SUFFIX)
 
 
 def check_develop(default_branch, has_develop):
@@ -1141,6 +1150,16 @@ def bounded_int(value):
     return number
 
 
+def safe_output_directory(value):
+    try:
+        root = Path.cwd().resolve()
+        output = (root / Path(value).expanduser()).resolve()
+        output.relative_to(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('must resolve to a directory inside the current working directory') from exc
+    return output
+
+
 def parse_exclusions(value, org):
     names = set()
     for name in re.split(r'[,\s]+', value.strip()):
@@ -1188,7 +1207,7 @@ def parse_args(argv):
                         help='Comment on stale non-draft human PRs. Requires --reminder-author.')
     parser.add_argument('--reminder-author', help='Login that posts reminders, e.g. my-app[bot].')
     parser.add_argument('--inner-source-checklist-repo', help='Defaults to ORG/private-ospo-resources.')
-    parser.add_argument('--output-dir', default='governance-report')
+    parser.add_argument('--output-dir', default='governance-report', type=safe_output_directory)
     parser.add_argument('--repo', action='append', help='Limit to these repository names (repeatable).')
     parser.add_argument('--exclusions-file', type=Path, default=DEFAULT_EXCLUSIONS_FILE,
                         help='Repository exclusion list file (one name per line; # comment lines allowed).')
@@ -1242,7 +1261,7 @@ def main(argv=None):
         },
         'repositories': repositories,
     }
-    output = Path(args.output_dir)
+    output = safe_output_directory(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     markdown = render_markdown(report)
     (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')

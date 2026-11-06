@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta, timezone
 from html import escape
 from pathlib import Path
 
-from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN
+from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN, safe_output_directory
 
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
@@ -210,14 +210,14 @@ def write_badges(report, output_dir, now=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', required=True, type=Path, help='Governance report JSON file.')
-    parser.add_argument('--output-dir', required=True, type=Path, help='Badge output directory.')
+    parser.add_argument('--output-dir', required=True, type=safe_output_directory, help='Badge output directory.')
     args = parser.parse_args(argv)
 
     try:
         with args.report.open(encoding='utf-8') as handle:
             report = json.load(handle)
         badges = write_badges(report, args.output_dir)
-    except (OSError, UnicodeError, json.JSONDecodeError, InvalidReport, ValueError):
+    except (OSError, ValueError):
         parser.error('could not read a valid governance report or write SVG badges')
     print(f'Generated badges for {len(badges)} repositories.')
     return 0
