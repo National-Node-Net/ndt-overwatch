@@ -1,0 +1,1378 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# © Crown Copyright 2026. This work has been developed by the National Digital Twin Programme and is legally attributed to the UK's Department for Business, Innovation, Science and Trade (BIST) as the governing entity.
+"""Scan every active repository in a GitHub organisation and write an OSPO governance dashboard."""
+
+import argparse
+import base64
+import hashlib
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
+from pathlib import Path
+from urllib.parse import urlparse
+
+DEPENDABOT = 'dependabot[bot]'
+BOT_SUFFIX = '[bot]'
+DEFAULT_EXCLUSIONS_FILE = Path(__file__).with_name('excluded-repositories.txt')
+GOVERNANCE_PATHS_FILE = Path(__file__).with_name('governance-only-paths.txt')
+GOVERNANCE_ACTIVITY_REPOSITORIES_FILE = Path(__file__).with_name('governance-activity-repositories.txt')
+TEMPLATE_FILES = [
+    '.github/PULL_REQUEST_TEMPLATE.md',
+    '.github/ISSUE_TEMPLATE/bug_report.md',
+    '.github/ISSUE_TEMPLATE/feature_request.md',
+]
+DEPENDABOT_CONFIGS = ['.github/dependabot.yml', '.github/dependabot.yaml']
+WORK_BRANCH_PREFIXES = ('feature/', 'bugfix/', 'hotfix/', 'release/')
+VERY_OLD_DEPENDABOT_DAYS = 90
+HUMAN_PR_MARKER = '<!-- ospo-stale-human-pr-reminder -->'
+TRUFFLEHOG_IMAGE = 'trufflesecurity/trufflehog@sha256:47a84bc18a0d04a165498bbbd3bacfd84176661cbc91f8e0f85467f6a771e99a'
+# Slightly under a week so a weekly schedule that runs early still reminds.
+REMINDER_COOLDOWN = timedelta(days=6)
+
+TRANSIENT_ERROR = re.compile(r'EOF|timeout|connection reset|HTTP 5\d\d', re.IGNORECASE)
+
+OK, WARN, FAIL, NA, ERROR = 'OK', 'WARN', 'FAIL', 'N/A', 'ERROR'
+STATUSES = [OK, WARN, FAIL, NA, ERROR]
+STATUS_COLORS = {OK: '#1a7f37', WARN: '#9a6700', FAIL: '#cf222e', NA: '#6e7781', ERROR: '#cf222e'}
+STATUS_ICON_REF = os.environ.get('STATUS_ICON_REF') or 'main'
+if not re.fullmatch(r'[A-Za-z0-9._/-]+', STATUS_ICON_REF) or '..' in STATUS_ICON_REF:
+    raise SystemExit(f'Invalid STATUS_ICON_REF: {STATUS_ICON_REF!r}')
+STATUS_BADGE_BASE_URL = (
+    f'https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/{STATUS_ICON_REF}/.github/badges'
+)
+STATUS_BADGE_FILES = {
+    OK: 'status-ok.svg',
+    WARN: 'status-warn.svg',
+    FAIL: 'status-fail.svg',
+    NA: 'status-na.svg',
+    ERROR: 'status-error.svg',
+}
+
+COLUMNS = [
+    ('develop', 'Develop branch'),
+    ('files', 'Required governance files'),
+    ('templates', 'Pull request and issue templates'),
+    ('dependabot_config', 'Dependabot configuration'),
+    ('dependabot_prs', 'Dependabot pull requests'),
+    ('human_prs', 'Human pull requests'),
+    ('secret_scan', 'TruffleHog verified credential scan'),
+    ('sbom', 'Release SBOM asset'),
+    ('delete_branch', 'Automatic branch deletion'),
+    ('dependabot_auto_merge', 'Dependabot GitHub Actions auto-merge workflow'),
+    ('activity', 'Recent repository activity'),
+    ('workflows', 'OSPO workflow synchronization'),
+    ('auto_backmerge', 'Main-to-develop back-merge'),
+]
+
+MATRIX_HEADERS = {
+    'develop': 'Develop<br>branch',
+    'files': 'Required governance<br>files',
+    'templates': 'Pull request and issue<br>templates',
+    'dependabot_config': 'Dependabot<br>configuration',
+    'dependabot_prs': 'Dependabot pull<br>requests',
+    'human_prs': 'Human pull<br>requests',
+    'secret_scan': 'Verified credential<br>scan',
+    'sbom': 'Release SBOM<br>asset',
+    'delete_branch': 'Automatic branch<br>deletion',
+    'dependabot_auto_merge': 'Dependabot GitHub Actions<br>auto-merge workflow',
+    'activity': 'Recent repository<br>activity',
+    'workflows': 'OSPO workflow<br>synchronization',
+    'auto_backmerge': 'Main-to-develop<br>back-merge',
+}
+
+GRAPHQL_ACTIVITY = '''
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    develop: ref(qualifiedName: "refs/heads/develop") {
+            target {
+                ... on Commit {
+                    history(first: 100) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+    }
+    main: ref(qualifiedName: "refs/heads/main") {
+            target {
+                ... on Commit {
+                    history(first: 100) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+    }
+    defaultBranchRef {
+            target {
+                ... on Commit {
+                    history(first: 100) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+    }
+    refs(refPrefix: "refs/heads/", first: 100, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+            nodes {
+                name
+                target {
+                    ... on Commit {
+                        oid
+                        committedDate
+                        messageHeadline
+                        messageBody
+                        parents(first: 2) { totalCount }
+                        author { name user { login __typename } }
+                    }
+                }
+            }
+    }
+  }
+}
+'''
+
+GRAPHQL_HISTORY_PAGE = '''
+query($owner: String!, $name: String!, $branch: String!, $after: String) {
+    repository(owner: $owner, name: $name) {
+        ref(qualifiedName: $branch) {
+            target {
+                ... on Commit {
+                    history(first: 100, after: $after) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+        }
+            }
+    }
+    }
+}
+'''
+
+
+class ApiError(Exception):
+    pass
+
+
+def gh_api(endpoint, *, token=None, paginate=False, method=None, body=None, raw=False, fields=None):
+    command = _gh_api_command(endpoint, paginate=paginate, method=method, body=body, raw=raw, fields=fields)
+    response, message = _run_gh_api(command, token=token, body=body, attempts=1 if method else 3)
+    if response.returncode != 0:
+        raise ApiError(f'{endpoint}: {message}')
+    if raw:
+        return response.stdout
+    if paginate:
+        return [json.loads(line) for line in response.stdout.splitlines() if line.strip()]
+    return json.loads(response.stdout) if response.stdout.strip() else None
+
+
+def _gh_api_command(endpoint, *, paginate, method, body, raw, fields):
+    command = ['gh', 'api', endpoint]
+    if raw:
+        command += ['-H', 'Accept: application/vnd.github.raw']
+    if paginate:
+        command += ['--paginate', '--jq', '.[] | tojson']
+    if method:
+        command += ['--method', method]
+    if body is not None:
+        command += ['--input', '-']
+    for key, value in (fields or {}).items():
+        command += ['-f', f'{key}={value}']
+    return command
+
+
+def _run_gh_api(command, *, token, body, attempts):
+    env = dict(os.environ)
+    if token:
+        env['GH_TOKEN'] = token
+    # Writes are never retried, so a reminder cannot be posted twice.
+    for attempt in range(attempts):
+        response = subprocess.run(
+            command, input=json.dumps(body) if body is not None else None,
+            text=True, capture_output=True, timeout=60, env=env,
+        )
+        message = (response.stderr or response.stdout).strip()
+        if response.returncode == 0 or attempt + 1 == attempts or not TRANSIENT_ERROR.search(message):
+            return response, message
+        time.sleep(2 * (attempt + 1))
+
+
+def parse_time(value):
+    return datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+
+def age_days(value, now):
+    return (now - parse_time(value)).days
+
+
+def result(status, summary, details=None):
+    return {'status': status, 'summary': summary, 'details': list(details or [])}
+
+
+def git_blob_sha(data):
+    return hashlib.sha1(b'blob %d\0' % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def read_list_file(text):
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('#')]
+
+
+def is_bot_author(author):
+    user = (author or {}).get('user') or {}
+    login = (user.get('login') or '').lower()
+    name = ((author or {}).get('name') or '').lower()
+    return user.get('__typename') == 'Bot' or login.endswith(BOT_SUFFIX) or name.endswith(BOT_SUFFIX)
+
+
+def is_governance_only(paths, patterns):
+    return bool(paths) and all(any(fnmatchcase(path, pattern) for pattern in patterns) for path in paths)
+
+
+def is_activity_commit(commit, *, include_governance_activity=False):
+    if is_bot_author(commit.get('author')):
+        return False
+    if not include_governance_activity:
+        message = f'{commit.get("messageHeadline") or ""}\n{commit.get("messageBody") or ""}'.casefold()
+        if 'ospo' in message:
+            return False
+    return (commit.get('parents') or {}).get('totalCount', 0) < 2
+
+
+def is_bot_user(user):
+    return (user or {}).get('type') == 'Bot' or ((user or {}).get('login') or '').endswith(BOT_SUFFIX)
+
+
+def check_develop(default_branch, has_develop):
+    if has_develop:
+        return result(OK, 'present')
+    if default_branch != 'main':
+        return result(NA, f'default branch is {default_branch}')
+    return result(FAIL, 'missing', ['Default branch is main but no develop branch exists.'])
+
+
+def check_required_paths(paths, required, label):
+    missing = [path for path in required if path not in paths]
+    if not missing:
+        return result(OK, f'all {len(required)} present')
+    summary = ', '.join(Path(path).name for path in missing) if len(missing) <= 2 else f'{len(missing)} missing'
+    return result(FAIL, summary, [f'Missing {label}: {path}' for path in missing])
+
+
+def check_dependabot_config(config_path, failures, evaluated=True):
+    if not config_path:
+        return result(FAIL, 'no dependabot.yml', ['No .github/dependabot.yml on the default branch.'])
+    if not evaluated:
+        return result(NA, 'conftest not installed')
+    if failures:
+        return result(FAIL, f'{len(failures)} policy failures', [f'Dependabot policy: {msg}' for msg in failures])
+    return result(OK, 'policy passed')
+
+
+def _parse_trufflehog_finding(line):
+    try:
+        finding = json.loads(line)
+    except json.JSONDecodeError:
+        raise ValueError('Malformed scanner JSON') from None
+    if not isinstance(finding, dict):
+        raise ValueError('Malformed scanner result')
+    return finding
+
+
+def _trufflehog_repository(finding, names, repositories, local_repository):
+    git = (((finding.get('SourceMetadata') or {}).get('Data') or {}).get('Git') or {})
+    repository_url = git.get('repository') or ''
+    path = urlparse(repository_url).path.strip('/').removesuffix('.git').lower()
+    repo_name = names.get(path)
+    if local_repository and len(repositories) == 1 and repository_url.startswith('file://'):
+        return repositories[0]['name']
+    return repo_name
+
+
+def parse_trufflehog_output(output, repositories, *, local_repository=False):
+    names = {repo['full_name'].lower(): repo['name'] for repo in repositories}
+    counts = {repo['name']: 0 for repo in repositories}
+    unmapped = 0
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        finding = _parse_trufflehog_finding(line)
+        if finding.get('Verified') is not True:
+            continue
+        repo_name = _trufflehog_repository(finding, names, repositories, local_repository)
+        if repo_name:
+            counts[repo_name] += 1
+        else:
+            unmapped += 1
+    return counts, unmapped
+
+
+def check_secret_scan(count, *, available=True, error=None, reason=None):
+    if error:
+        return result(ERROR, error, ['Scanner output and credential data were suppressed from the report.'])
+    if not available:
+        return result(NA, reason or 'TruffleHog scan unavailable')
+    if count:
+        return result(FAIL, f'{count} verified finding(s)', [
+            f'TruffleHog verified {count} credential(s); secret values and locations are withheld.'
+        ])
+    return result(OK, 'no verified credentials found')
+
+
+def check_trufflehog_result(exit_code, output, repo, *, local_repository=False):
+    if exit_code != 0:
+        return check_secret_scan(0, error=f'TruffleHog exited with code {exit_code}')
+    try:
+        counts, unmapped = parse_trufflehog_output(output, [repo], local_repository=local_repository)
+    except ValueError:
+        return check_secret_scan(0, error='TruffleHog returned malformed JSON')
+    if unmapped:
+        return check_secret_scan(0, error=f'{unmapped} verified finding(s) could not be attributed')
+    return check_secret_scan(counts[repo['name']])
+
+
+def check_dependabot_prs(prs, now, stale_days):
+    dependabot = [pr for pr in prs if pr['user']['login'] == DEPENDABOT]
+    if not dependabot:
+        return result(OK, '0 open')
+    ages = {pr['number']: age_days(pr['created_at'], now) for pr in dependabot}
+    stale = [pr for pr in dependabot if ages[pr['number']] > stale_days]
+    very_old = [pr for pr in stale if ages[pr['number']] > VERY_OLD_DEPENDABOT_DAYS]
+    summary = f'{len(dependabot)} open, {len(stale)} >{stale_days}d'
+    if very_old:
+        summary += f', {len(very_old)} >{VERY_OLD_DEPENDABOT_DAYS}d'
+    details = [f'Dependabot PR #{pr["number"]} open {ages[pr["number"]]} days: {pr["title"]}' for pr in stale]
+    if very_old:
+        status = FAIL
+    elif stale:
+        status = WARN
+    else:
+        status = OK
+    return result(status, summary, details)
+
+
+def stale_human_prs(prs, now, days):
+    return [pr for pr in prs if not is_bot_user(pr['user']) and age_days(pr['created_at'], now) > days]
+
+
+def check_human_prs(prs, now, days, reminder_notes=None):
+    human = [pr for pr in prs if not is_bot_user(pr['user'])]
+    stale = stale_human_prs(prs, now, days)
+    if not stale:
+        return result(OK, f'{len(human)} open, 0 >{days}d')
+    notes = reminder_notes or {}
+    details = []
+    for pr in stale:
+        flags = []
+        if pr.get('draft'):
+            flags.append('draft')
+        if pr['base']['ref'] == 'main' and not pr['head']['ref'].startswith(('release/', 'hotfix/')):
+            flags.append('targets main')
+        if pr['number'] in notes:
+            flags.append(notes[pr['number']])
+        suffix = f' [{", ".join(flags)}]' if flags else ''
+        details.append(
+            f'PR #{pr["number"]} by {pr["user"]["login"]} open {age_days(pr["created_at"], now)} days{suffix}: {pr["title"]}'
+        )
+    return result(WARN, f'{len(human)} open, {len(stale)} >{days}d', details)
+
+
+def has_sbom(release):
+    return any(
+        asset['name'].lower().endswith('.spdx.json') or 'sbom' in asset['name'].lower()
+        for asset in release.get('assets', [])
+    )
+
+
+def check_sbom(releases, now, days):
+    published = [r for r in releases if not r.get('draft') and r.get('published_at')]
+    if not published:
+        return {**result(NA, 'no releases'), 'applicable': False}
+    published.sort(key=lambda r: r['published_at'], reverse=True)
+    recent = [r for r in published if age_days(r['published_at'], now) <= days]
+    evaluated = recent or published[:1]
+    missing = [r for r in evaluated if not has_sbom(r)]
+    scope = f'last {days}d' if recent else 'latest'
+    details = [f'Release {r["tag_name"]} ({r["published_at"][:10]}) has no SBOM asset' for r in missing]
+    if missing:
+        return result(FAIL, f'{len(missing)}/{len(evaluated)} missing ({scope})', details)
+    return result(OK, f'{len(evaluated)} with SBOM ({scope})')
+
+
+def check_delete_branch(value):
+    if value is None:
+        return result(NA, 'unknown', ['Merge settings require a token with Contents: write.'])
+    return result(OK, 'on') if value else result(FAIL, 'off', ['delete_branch_on_merge is disabled.'])
+
+
+def check_dependabot_auto_merge(workflow_run, jobs):
+    steps = [step for job in jobs for step in job.get('steps', [])]
+    if any(step['name'] == 'Skip non-GitHub Actions updates' and step.get('conclusion') == 'success' for step in steps):
+        return None
+    number = workflow_run.get('run_number', workflow_run['id'])
+    date = workflow_run.get('created_at', '')[:10]
+    link = f'[run #{number}]({workflow_run["html_url"]})'
+    details = [f'Dependabot auto-merge workflow: {workflow_run["html_url"]}']
+    if workflow_run.get('status') != 'completed':
+        return result(WARN, f'{workflow_run.get("status", "pending")} {link} ({date})', details)
+    conclusion = workflow_run.get('conclusion')
+    failed_steps = [step['name'] for step in steps if step.get('conclusion') in ('failure', 'timed_out')]
+    if conclusion in ('failure', 'timed_out', 'startup_failure') or failed_steps:
+        details.extend(f'Failed step: {name}' for name in failed_steps)
+        return result(FAIL, f'failed {link} ({date})', details)
+    enable = next((step for step in steps if step['name'] == 'Enable auto-merge for the pull request'), None)
+    if conclusion == 'success' and enable and enable.get('conclusion') == 'success':
+        return result(OK, f'auto-merge enabled by {link} ({date})', details)
+    return result(WARN, f'{conclusion or "unknown"}; auto-merge not confirmed ({date})', details)
+
+
+def check_activity(activity, now, days):
+    develop = activity.get('develop')
+    branch_name = activity.get('scanBranch') or activity.get('activityBranch') or ('develop' if develop else 'default branch')
+    include_governance_activity = activity.get('includeGovernanceActivity', False)
+    source = activity.get('scanRef') or develop or activity.get('defaultBranchRef') or {}
+    history = (((source.get('target') or {}).get('history')) or {}).get('nodes', [])
+    # An explicit None means classification found no qualifying commit; do not fall back to raw history.
+    if 'latestHumanCommit' in activity:
+        latest_human = activity['latestHumanCommit']
+    else:
+        latest_human = latest_human_commit(history, include_governance_activity=include_governance_activity)
+    days_since_human = age_days(latest_human['committedDate'], now) if latest_human else None
+    since = now - timedelta(days=days)
+    active_branches = [
+        node['name'] for node in (activity.get('refs') or {}).get('nodes', [])
+        if node['name'].startswith(WORK_BRANCH_PREFIXES)
+        and (node.get('target') or {}).get('committedDate')
+        and parse_time(node['target']['committedDate']) >= since
+        and is_activity_commit(
+            node['target'], include_governance_activity=include_governance_activity)
+    ]
+    human_activity_recent = days_since_human is not None and days_since_human <= days
+    activity_summary = (
+        f'{days_since_human} days since last commit on {branch_name}'
+        if days_since_human is not None else f'no qualifying human commit found on {branch_name}'
+    )
+    activity_summary += f'; {len(active_branches)} active work branches ({days}d window)'
+    if human_activity_recent or active_branches:
+        return result(OK, activity_summary)
+    return result(
+        WARN, activity_summary,
+        [f'No human-authored commit on {branch_name} within {days} days and no active '
+         f'feature/bugfix/hotfix/release branches. Review for archive.'],
+    )
+
+
+def latest_human_commit(commits, *, include_governance_activity=False):
+    human = [
+        commit for commit in commits
+        if is_activity_commit(commit, include_governance_activity=include_governance_activity)
+    ]
+    return max(human, key=lambda commit: commit['committedDate']) if human else None
+
+
+def check_workflows(blob_shas, expected):
+    missing, outdated = [], []
+    for name, sha in expected.items():
+        target = f'.github/workflows/{name}'
+        if target not in blob_shas:
+            missing.append(name)
+        elif blob_shas[target] != sha:
+            outdated.append(name)
+    details = [f'Missing OSPO workflow: {name}' for name in missing] + [f'Out of sync with ospo-resources: {name}' for name in outdated]
+    if missing:
+        return result(FAIL, f'{len(missing)} missing, {len(outdated)} outdated', details)
+    if outdated:
+        return result(WARN, f'{len(outdated)} outdated', details)
+    return result(OK, f'all {len(expected)} in sync')
+
+
+def check_auto_backmerge(workflow_present, runs):
+    if not workflow_present:
+        return result(FAIL, 'workflow missing from default branch', ['.github/workflows/auto-back-merge.yml is missing.'])
+    attempts = [run for run in runs if run.get('conclusion') != 'skipped']
+    if not attempts:
+        return result(NA, 'no back-merge attempts recorded')
+
+    latest = attempts[0]
+    run_id = latest.get('run_number', latest.get('id', '?'))
+    run_date = latest.get('created_at', '')[:10]
+    conclusion = latest.get('conclusion')
+    state = latest.get('status')
+    run_url = latest.get('html_url')
+    run_reference = f'[run #{run_id}]({run_url})' if run_url else f'run #{run_id}'
+    details = [f'Latest run: {run_url}'] if run_url else []
+
+    if state != 'completed':
+        return result(WARN, f'{state or "in progress"} {run_reference} ({run_date})', details)
+    if conclusion == 'success':
+        return result(OK, f'passed {run_reference} ({run_date})')
+    if conclusion in ('failure', 'timed_out', 'startup_failure'):
+        return result(FAIL, f'{conclusion.replace("_", " ")} {run_reference} ({run_date})', details)
+    return result(WARN, f'{conclusion or "unknown"} {run_reference} ({run_date})', details)
+
+
+def reminder_due(comments, bot_login, now):
+    for comment in comments:
+        if comment['user']['login'] == bot_login and HUMAN_PR_MARKER in (comment.get('body') or ''):
+            if now - parse_time(comment['created_at']) < REMINDER_COOLDOWN:
+                return False
+    return True
+
+
+def reminder_body(pr, now):
+    return (
+        f'{HUMAN_PR_MARKER}\n'
+        f'@{pr["user"]["login"]} this pull request has been open for {age_days(pr["created_at"], now)} days '
+        'without being merged. Please merge, update or close it. If it is still needed, add a short status update.\n\n'
+        'This is an automated OSPO governance reminder.'
+    )
+
+
+class Scanner:
+    def __init__(self, args, source_root, workflow_source_root):
+        if not workflow_source_root.is_dir():
+            raise SystemExit(f'OSPO workflow source checkout does not exist: {workflow_source_root}')
+        manifest_path = workflow_source_root / 'organisation-required-workflows.txt'
+        if not manifest_path.is_file():
+            raise SystemExit(f'OSPO workflow source manifest does not exist: {manifest_path}')
+        manifest = read_list_file(manifest_path.read_text())
+        missing = [path for path in manifest if not (workflow_source_root / path).is_file()]
+        if missing:
+            raise SystemExit(f'Listed OSPO source workflows missing from {workflow_source_root}: {", ".join(missing)}')
+        self.args = args
+        self.org = args.org
+        self.now = datetime.now(timezone.utc)
+        self.pr_token = os.environ.get('PR_TOKEN') or None
+        self.settings_token = os.environ.get('SETTINGS_TOKEN') or None
+        self.oss_files = read_list_file((source_root / 'oss-checklist-files.txt').read_text())
+        self.expected_workflows = {
+            Path(path).name: git_blob_sha((workflow_source_root / path).read_bytes())
+            for path in manifest
+        }
+        self.policy_dir = source_root / 'tools/policy-as-code/policy'
+        self.conftest = shutil.which('conftest')
+        self._inner_source_files = None
+        self.governance_paths = read_list_file(GOVERNANCE_PATHS_FILE.read_text(encoding='utf-8'))
+        self.governance_activity_repositories = load_exclusions(GOVERNANCE_ACTIVITY_REPOSITORIES_FILE, self.org)
+        self._activity_commit_cache = {}
+
+    def inner_source_files(self):
+        if self._inner_source_files is None:
+            text = gh_api(f'repos/{self.args.inner_source_checklist_repo}/contents/inner-source-checklist-files.txt', raw=True)
+            self._inner_source_files = read_list_file(text)
+        return self._inner_source_files
+
+    def run_conftest(self, content, metadata):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'dependabot.yml'
+            data = Path(tmp) / 'repository-metadata.json'
+            config.write_text(content)
+            data.write_text(json.dumps(metadata))
+            proc = subprocess.run(
+                [self.conftest, 'test', str(config), '-p', str(self.policy_dir), '--data', str(data),
+                 '--namespace', 'github.dependabot', '--output', 'json', '--no-color'],
+                text=True, capture_output=True, timeout=60,
+            )
+        try:
+            report = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return [f'could not evaluate: {(proc.stderr or proc.stdout).strip()[:300]}']
+        return sorted({failure['msg'] for item in report for failure in item.get('failures') or []})
+
+    def secret_scan(self, repos):
+        unavailable = {
+            repo['name']: check_secret_scan(0, available=False, reason='TruffleHog requires Docker')
+            for repo in repos
+        }
+        if not shutil.which('docker'):
+            return unavailable
+
+        token = os.environ.get('TRUFFLEHOG_GITHUB_TOKEN') or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+        if not token:
+            auth = subprocess.run(
+                ['gh', 'auth', 'token', '--hostname', 'github.com'],
+                text=True, capture_output=True, timeout=15,
+            )
+            if auth.returncode == 0:
+                token = auth.stdout.strip()
+        if not token:
+            credential_env = dict(os.environ)
+            credential_env['GIT_TERMINAL_PROMPT'] = '0'
+            credential = subprocess.run(
+                ['git', 'credential', 'fill'],
+                input='protocol=https\nhost=github.com\n\n',
+                text=True, capture_output=True, timeout=15, env=credential_env,
+            )
+            if credential.returncode == 0:
+                token = next(
+                    (line.split('=', 1)[1] for line in credential.stdout.splitlines() if line.startswith('password=')),
+                    None,
+                )
+        if not token:
+            return {
+                repo['name']: check_secret_scan(0, available=False, reason='GitHub token unavailable')
+                for repo in repos
+            }
+
+        results = {}
+        for repo in repos:
+            print(f'Scanning Git history for credentials: {repo["full_name"]}', file=sys.stderr)
+            results[repo['name']] = self.scan_git_history(repo, token)
+        return results
+
+    def scan_git_history(self, repo, token):
+        with tempfile.TemporaryDirectory(prefix='ospo-scan-') as tmp:
+            env = dict(os.environ)
+            auth = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+            env.update({
+                'GIT_CONFIG_COUNT': '2',
+                'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                'GIT_CONFIG_VALUE_0': f'AUTHORIZATION: basic {auth}',
+                'GIT_CONFIG_KEY_1': 'credential.helper',
+                'GIT_CONFIG_VALUE_1': '',
+                'GIT_TERMINAL_PROMPT': '0',
+            })
+            container_name = Path(tmp).name
+            try:
+                clone = subprocess.run(
+                    ['git', 'clone', '--no-checkout', f'https://github.com/{repo["full_name"]}.git',
+                     str(Path(tmp) / 'repository')],
+                    env=env, text=True, capture_output=True, timeout=300,
+                )
+                if clone.returncode != 0:
+                    return check_secret_scan(0, error=f'Git history clone failed (exit {clone.returncode})')
+                index = subprocess.run(
+                    ['git', '-C', str(Path(tmp) / 'repository'), 'read-tree', 'HEAD'],
+                    text=True, capture_output=True, timeout=30,
+                )
+                if index.returncode != 0:
+                    return check_secret_scan(0, error='Git history index could not be prepared')
+                # Only the clone receives authentication; scanner containers receive no GitHub token.
+                command = [
+                    'docker', 'run', '--rm', '--name', container_name,
+                    '--mount', f'type=bind,source={tmp},target=/scan,readonly', TRUFFLEHOG_IMAGE,
+                    'git', 'file:///scan/repository', '--results=verified', '--json',
+                    '--no-update', '--no-color', '--fail-on-scan-errors',
+                ]
+                scan = subprocess.run(command, text=True, capture_output=True, timeout=600)
+                return check_trufflehog_result(scan.returncode, scan.stdout, repo, local_repository=True)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                summary = 'Credential scan timed out' if isinstance(exc, subprocess.TimeoutExpired) else 'Credential scan could not start'
+                return check_secret_scan(0, error=summary)
+            finally:
+                subprocess.run(['docker', 'rm', '-f', container_name], capture_output=True, timeout=30)
+
+    def scan(self, repo, secret_result):
+        entry = self._new_scan_entry(repo, secret_result)
+        try:
+            state = self._load_scan_state(repo, entry)
+        except (ApiError, subprocess.TimeoutExpired, KeyError, TypeError) as exc:
+            self._mark_scan_incomplete(entry, exc)
+            return entry
+        self._run_repository_checks(repo, state, entry)
+        self._run_pull_request_checks(repo, entry)
+        return entry
+
+    @staticmethod
+    def _new_scan_entry(repo, secret_result):
+        entry = {
+            'name': repo['name'], 'url': repo['html_url'], 'visibility': repo.get('visibility', 'unknown'),
+            'default_branch': repo['default_branch'], 'scan_branch': repo['default_branch'],
+            'fork': repo.get('fork', False),
+            'checks': {'secret_scan': secret_result}, 'errors': [],
+        }
+        if secret_result['status'] in (ERROR, NA):
+            entry['errors'].append(f'secret_scan: {secret_result["summary"]}')
+        return entry
+
+    def _load_scan_state(self, repo, entry):
+        full = repo['full_name']
+        default = repo['default_branch']
+        activity = self.repository_activity(full, default)
+        scan_branch = activity.get('scanBranch', default)
+        entry['scan_branch'] = scan_branch
+        tree = gh_api(f'repos/{full}/git/trees/{scan_branch}?recursive=1')
+        blobs = {item['path']: item['sha'] for item in tree['tree'] if item['type'] == 'blob'}
+        if tree.get('truncated'):
+            entry['errors'].append('tree: listing truncated, file checks may be incomplete')
+        latest = activity.get('latestHumanCommit') or {}
+        latest_application = activity.get('latestApplicationCommit') or {}
+        entry['activity'] = {
+            'branch': activity.get('activityBranch', default),
+            'last_commit_at': latest.get('committedDate'),
+            'last_application_commit_at': latest_application.get('committedDate'),
+        }
+        return {
+            'blobs': blobs, 'activity': activity, 'scan_branch': scan_branch,
+            'has_develop': activity.get('develop') is not None,
+        }
+
+    @staticmethod
+    def _mark_scan_incomplete(entry, exc):
+        entry['errors'].append(f'scan: {str(exc)[:300]}')
+        for key, _ in COLUMNS:
+            if key != 'secret_scan':
+                entry['checks'][key] = result(ERROR, 'not scanned')
+
+    @staticmethod
+    def _run_check(entry, key, func):
+        try:
+            entry['checks'][key] = func()
+        except (ApiError, subprocess.TimeoutExpired, KeyError, ValueError) as exc:
+            entry['checks'][key] = result(ERROR, 'error', [str(exc)[:300]])
+            entry['errors'].append(f'{key}: {str(exc)[:300]}')
+
+    def _run_repository_checks(self, repo, state, entry):
+        full = repo['full_name']
+        default = repo['default_branch']
+        scan_branch = state['scan_branch']
+        blobs = state['blobs']
+        paths = set(blobs)
+        self._run_check(entry, 'develop', lambda: check_develop(default, state['has_develop']))
+        self._run_check(entry, 'files', lambda: check_required_paths(
+            paths, self.oss_files if repo.get('visibility') == 'public' else self.inner_source_files(), 'file'))
+        self._run_check(entry, 'templates', lambda: check_required_paths(paths, TEMPLATE_FILES, 'template'))
+        self._run_check(entry, 'dependabot_config', lambda: self.dependabot_config(
+            full, scan_branch, paths, state['has_develop']))
+        self._run_check(entry, 'sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
+        self._run_check(entry, 'delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
+        self._run_check(entry, 'dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
+        self._run_check(entry, 'activity', lambda: check_activity(state['activity'], self.now, self.args.dormant_days))
+        self._run_check(entry, 'workflows', lambda: check_workflows(blobs, self.expected_workflows))
+        self._run_check(entry, 'auto_backmerge', lambda: self.auto_backmerge(full, paths))
+
+    def _run_pull_request_checks(self, repo, entry):
+        full = repo['full_name']
+        try:
+            prs = gh_api(f'repos/{full}/pulls?state=open&per_page=100', token=self.pr_token, paginate=True)
+        except (ApiError, subprocess.TimeoutExpired) as exc:
+            for key in ('dependabot_prs', 'human_prs'):
+                entry['checks'][key] = result(ERROR, 'error', [str(exc)[:300]])
+            entry['errors'].append(f'pulls: {str(exc)[:300]}')
+            return
+        self._run_check(entry, 'dependabot_prs', lambda: check_dependabot_prs(prs, self.now, self.args.dependabot_pr_days))
+        self._run_check(entry, 'human_prs', lambda: check_human_prs(
+            prs, self.now, self.args.human_pr_days, self.remind(full, prs, entry)))
+
+    def commit_counts_as_activity(self, full, commit, *, include_governance_activity=None):
+        include_governance = self.includes_governance_activity(full, include_governance_activity)
+        if not is_activity_commit(commit, include_governance_activity=include_governance):
+            return False
+        key = (full, commit['oid'], include_governance)
+        if key not in self._activity_commit_cache:
+            self._activity_commit_cache[key] = self._commit_has_activity_paths(
+                full, commit['oid'], include_governance)
+        return self._activity_commit_cache[key]
+
+    def includes_governance_activity(self, full, include_governance_activity):
+        if include_governance_activity is not None:
+            return include_governance_activity
+        return full.split('/', 1)[1].casefold() in self.governance_activity_repositories
+
+    def _commit_has_activity_paths(self, full, oid, include_governance_activity):
+        page = 1
+        paths = []
+        while True:
+            response = gh_api(f'repos/{full}/commits/{oid}?per_page=100&page={page}')
+            if 'files' not in response:
+                raise ApiError('Commit file list unavailable; cannot classify activity')
+            files = response['files']
+            self._append_commit_paths(paths, files)
+            if paths and self._commit_paths_are_activity(paths, include_governance_activity):
+                return True
+            if len(files) < 100:
+                return False
+            if page >= 30:
+                raise ApiError('Commit file list reaches GitHub limit; cannot classify governance-only activity')
+            page += 1
+
+    @staticmethod
+    def _append_commit_paths(paths, files):
+        for file in files:
+            paths.append(file['filename'])
+            if file.get('previous_filename'):
+                paths.append(file['previous_filename'])
+
+    def _commit_paths_are_activity(self, paths, include_governance_activity):
+        return include_governance_activity or not is_governance_only(paths, self.governance_paths)
+
+    def latest_project_commit(self, full, branch, history, since=None, *, include_governance_activity=None):
+        while True:
+            commit = self._latest_project_commit_in_page(
+                full, history, since, include_governance_activity)
+            if commit:
+                return commit
+            history = self._next_project_history_page(full, branch, history, since)
+            if history is None:
+                return None
+
+    def _latest_project_commit_in_page(self, full, history, since, include_governance_activity):
+        nodes = sorted(history.get('nodes', []), key=lambda node: node['committedDate'], reverse=True)
+        for node in nodes:
+            if since and parse_time(node['committedDate']) < since:
+                continue
+            if self.commit_counts_as_activity(
+                full, node, include_governance_activity=include_governance_activity):
+                return node
+        return None
+
+    def _next_project_history_page(self, full, branch, history, since):
+        page_info = history.get('pageInfo') or {}
+        if not page_info.get('hasNextPage'):
+            return None
+        nodes = history.get('nodes', [])
+        if since and nodes and max(parse_time(node['committedDate']) for node in nodes) < since:
+            return None
+        data = gh_api('graphql', fields={
+            'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
+            'branch': f'refs/heads/{branch}', 'after': page_info['endCursor'],
+        })
+        ref = data['data']['repository']['ref']
+        if ref is None:
+            raise ApiError('Activity branch disappeared during history scan')
+        return ref['target']['history']
+
+    def repository_activity(self, full, default, scan_branch=None):
+        data = gh_api('graphql', fields={
+            'query': GRAPHQL_ACTIVITY, 'owner': self.org, 'name': full.split('/', 1)[1],
+        })
+        activity = data['data']['repository']
+        requested_branch = scan_branch or self.args.scan_branch
+        branch, source = self.activity_source(activity, default, requested_branch)
+        activity['scanBranch'] = branch
+        activity['scanRef'] = source
+        include_governance_activity = self.includes_governance_activity(full, None)
+        activity['activityBranch'] = branch
+        activity['includeGovernanceActivity'] = include_governance_activity
+        history = (source.get('target') or {}).get('history') or {}
+        activity['latestHumanCommit'] = self.latest_project_commit(
+            full, branch, history, include_governance_activity=include_governance_activity)
+        activity['latestApplicationCommit'] = self.latest_application_commit(
+            full, branch, history, include_governance_activity, activity['latestHumanCommit'])
+        self.update_work_branch_activity(full, activity)
+        return activity
+
+    @staticmethod
+    def activity_source(activity, default, requested_branch='auto'):
+        if requested_branch == 'auto':
+            requested_branch = 'develop' if activity.get('develop') else default
+        source = activity.get(requested_branch)
+        if source is not None:
+            return requested_branch, source
+        return default, activity.get('defaultBranchRef') or {}
+
+    def latest_application_commit(self, full, branch, history, include_governance_activity, latest_human):
+        if not include_governance_activity:
+            return latest_human
+        return self.latest_project_commit(full, branch, history, include_governance_activity=False)
+
+    def update_work_branch_activity(self, full, activity):
+        since = self.now - timedelta(days=self.args.dormant_days)
+        for work_branch in (activity.get('refs') or {}).get('nodes', []):
+            self.update_work_branch(full, work_branch, since)
+
+    def update_work_branch(self, full, work_branch, since):
+        tip = work_branch.get('target')
+        if not tip or not work_branch['name'].startswith(WORK_BRANCH_PREFIXES):
+            return
+        if parse_time(tip['committedDate']) < since or self.commit_counts_as_activity(full, tip):
+            return
+        data = gh_api('graphql', fields={
+            'query': GRAPHQL_HISTORY_PAGE, 'owner': self.org, 'name': full.split('/', 1)[1],
+            'branch': f'refs/heads/{work_branch["name"]}',
+        })
+        ref = data['data']['repository']['ref']
+        if ref is None:
+            raise ApiError('Work branch disappeared during activity scan')
+        work_branch['target'] = self.latest_project_commit(
+            full, work_branch['name'], ref['target']['history'], since)
+
+    def dependabot_config(self, full, scan_branch, paths, has_develop):
+        config_path = next((path for path in DEPENDABOT_CONFIGS if path in paths), None)
+        if not config_path or not self.conftest:
+            return check_dependabot_config(config_path, [], evaluated=bool(self.conftest))
+        content = gh_api(f'repos/{full}/contents/{config_path}?ref={scan_branch}', raw=True)
+        metadata = {'repository': {'defaultBranch': scan_branch, 'hasDevelopBranch': has_develop}}
+        return check_dependabot_config(config_path, self.run_conftest(content, metadata))
+
+    def repo_setting(self, full, state, setting):
+        if 'settings' not in state:
+            state['settings'] = gh_api(f'repos/{full}', token=self.settings_token)
+        return state['settings'].get(setting)
+
+    def auto_backmerge(self, full, paths):
+        workflow_path = '.github/workflows/auto-back-merge.yml'
+        if workflow_path not in paths:
+            return check_auto_backmerge(False, [])
+        try:
+            runs = gh_api(f'repos/{full}/actions/workflows/auto-back-merge.yml/runs?per_page=100')
+        except ApiError as exc:
+            if re.search(r'HTTP 403|HTTP 404|Resource not accessible by integration|Actions is disabled', str(exc), re.IGNORECASE):
+                return result(
+                    NA, 'Actions run history unavailable',
+                    ['The repository reader App needs Actions: read permission to inspect workflow runs.'],
+                )
+            raise
+        return check_auto_backmerge(True, runs.get('workflow_runs', []))
+
+    def dependabot_auto_merge(self, full, paths):
+        workflow = 'auto-merge-dependabot-pull-requests.yml'
+        if f'.github/workflows/{workflow}' not in paths:
+            return result(FAIL, 'workflow missing from default branch', [f'Missing .github/workflows/{workflow}.'])
+        try:
+            page = 1
+            while True:
+                response = gh_api(f'repos/{full}/actions/workflows/{workflow}/runs?per_page=100&page={page}')
+                runs = response.get('workflow_runs', [])
+                for workflow_run in runs:
+                    if workflow_run.get('conclusion') == 'skipped':
+                        continue
+                    jobs = gh_api(f'repos/{full}/actions/runs/{workflow_run["id"]}/jobs?per_page=100')
+                    check = check_dependabot_auto_merge(workflow_run, jobs.get('jobs', []))
+                    if check is not None:
+                        return check
+                if len(runs) < 100:
+                    break
+                page += 1
+        except ApiError as exc:
+            if re.search(r'HTTP 403|HTTP 404|Resource not accessible by integration|Actions is disabled', str(exc), re.IGNORECASE):
+                return result(NA, 'Actions run history unavailable', ['The reader App needs Actions: read to inspect private workflow runs and job steps.'])
+            raise
+        return result(NA, 'no applicable runs recorded', ['Human PRs and non-GitHub-Actions update skips do not count as successful auto-merge attempts.'])
+
+    def remind(self, full, prs, entry):
+        notes = {}
+        for pr in stale_human_prs(prs, self.now, self.args.human_pr_days):
+            if pr.get('draft'):
+                continue
+            number = pr['number']
+            if not self.args.post_reminders:
+                notes[number] = 'would remind'
+                continue
+            try:
+                comments = gh_api(f'repos/{full}/issues/{number}/comments?per_page=100', token=self.pr_token, paginate=True)
+                if not reminder_due(comments, self.args.reminder_author, self.now):
+                    notes[number] = 'recently reminded'
+                    continue
+                current = gh_api(f'repos/{full}/pulls/{number}', token=self.pr_token)
+                if current['state'] != 'open':
+                    notes[number] = 'closed during scan'
+                    continue
+                gh_api(f'repos/{full}/issues/{number}/comments', token=self.pr_token, method='POST',
+                       body={'body': reminder_body(pr, self.now)})
+                notes[number] = 'reminded'
+            except (ApiError, subprocess.TimeoutExpired, KeyError, ValueError) as exc:
+                notes[number] = 'reminder failed'
+                entry['errors'].append(f'reminder #{number}: {str(exc)[:300]}')
+        return notes
+
+
+def cell(text):
+    return str(text).replace('|', '\\|').replace('\n', ' ')
+
+
+def markdown_status(status):
+    return f'![{status}]({STATUS_BADGE_BASE_URL}/{STATUS_BADGE_FILES[status]})'
+
+
+def repository_groups(repositories):
+    groups = [
+        ('Public repositories', [repo for repo in repositories if repo['visibility'] == 'public']),
+        ('Private and internal repositories', [repo for repo in repositories if repo['visibility'] in ('private', 'internal')]),
+    ]
+    unknown = [repo for repo in repositories if repo['visibility'] not in ('public', 'private', 'internal')]
+    if unknown:
+        groups.append(('Repositories with unknown visibility', unknown))
+    return groups
+
+
+def render_markdown(report):
+    args = report['parameters']
+    repos = report['repositories']
+    legend = report.get('legend', {})
+    public_required_files = ', '.join('`' + path + '`' for path in legend.get('public_required_files', []))
+    private_required_files = ', '.join('`' + path + '`' for path in legend.get('private_required_files', []))
+    lines = [
+        f'# OSPO governance dashboard: {report["organisation"]}',
+        '',
+        f'Generated {report["generated_at"]} UTC. Mode: {report["mode"]}. Repositories scanned: {len(repos)}. '
+        f'Archived/disabled skipped: {len(report["skipped"])}.',
+        f'Scan branch preference: `{args.get("scan_branch", "auto")}`. `auto` prefers `develop` and falls back to the repository default.',
+        f'Excluded by report policy: {", ".join(report.get("excluded", [])) or "none"}.',
+        '',
+        f'Thresholds: human PRs >{args["human_pr_days"]}d, Dependabot PRs >{args["dependabot_pr_days"]}d, '
+        f'dormant after {args["dormant_days"]}d, releases checked for SBOM within {args["release_days"]}d (else latest).',
+        '',
+        '## Summary',
+        '',
+        '| Check | Counts |',
+        '| --- | --- |',
+    ]
+    for key, title in COLUMNS:
+        counts = [sum(1 for r in repos if r['checks'].get(key, {}).get('status') == s) for s in STATUSES]
+        count_text = '; '.join(f'{markdown_status(status)} {count}' for status, count in zip(STATUSES, counts) if count)
+        lines.append(f'| {title} | {count_text or "-"} |')
+
+    lines += [
+        '',
+        '## Repositories',
+        '',
+        'Each cell shows the full status and a short result. Expand a repository below for affected files, PRs, releases, and workflow details.',
+    ]
+    for title, group in repository_groups(repos):
+        lines += [
+            '', f'### {title} ({len(group)})', '',
+            '| Repository | ' + ' | '.join(MATRIX_HEADERS[key] for key, _ in COLUMNS) + ' |',
+            '| --- | ' + ' | '.join('---' for _ in COLUMNS) + ' |',
+        ]
+        for repo in group:
+            statuses = [
+                f'{markdown_status(check["status"])}<br><sub><sup>{cell(check["summary"])}</sup></sub>'
+                for key, _ in COLUMNS
+                for check in [repo['checks'].get(key, result(NA, '-'))]
+            ]
+            lines.append(
+                f'| [{cell(repo["name"])}]({repo["url"]}) | ' + ' | '.join(statuses) + ' |'
+            )
+
+    lines += ['', 'Status details are available in each repository section below.', '', '## Repository details', '']
+    for repo in repos:
+        lines.append(
+            f'<details><summary>{cell(repo["name"])} | {repo["visibility"]} | default: {cell(repo["default_branch"])} | scanned: {cell(repo.get("scan_branch", repo["default_branch"]))}</summary>'
+        )
+        details = [d for key, _ in COLUMNS for d in repo['checks'].get(key, {}).get('details', [])
+                   if repo['checks'][key]['status'] in (WARN, FAIL, ERROR)]
+        details += [f'Processing error: {e}' for e in repo['errors']]
+        if details:
+            lines += ['', 'Findings:', '']
+            lines += [f'- {cell(d)}' for d in details]
+        lines += ['', '</details>', '']
+
+    if report['skipped']:
+        lines += ['## Skipped', '', ', '.join(report['skipped']), '']
+    if report.get('excluded'):
+        lines += ['## Excluded from scan', '', ', '.join(report['excluded']), '']
+    lines += [
+        '## Legend and check definitions',
+        '',
+        f'- **Status colours:** {markdown_status(OK)} = passed; {markdown_status(WARN)} = attention; '
+        f'{markdown_status(FAIL)} = failed/action required; {markdown_status(NA)} = not available or not applicable; '
+        f'{markdown_status(ERROR)} = check could not complete.',
+        f'- **Required governance files for public repositories:** {public_required_files}.',
+        f'- **Required governance files for private/internal repositories:** {private_required_files}.',
+        '- **Pull request template:** `.github/PULL_REQUEST_TEMPLATE.md`.',
+        '- **Issue templates:** `.github/ISSUE_TEMPLATE/bug_report.md` and `.github/ISSUE_TEMPLATE/feature_request.md`.',
+        '- **OSPO workflow synchronization:** compares each repository\'s default branch byte for byte with the workflow manifest '
+        'and workflow files published on `National-Node-Net/ospo-resources` `main`, not `develop`. '
+        'Checklists and Dependabot policy remain sourced separately from `develop`.',
+        '- **Dependabot GitHub Actions auto-merge workflow:** checks the latest applicable workflow run and job steps. '
+        'OK requires a successful auto-merge enablement step; FAIL means a failed attempt; WARN means running or unconfirmed. '
+        'Skipped human PRs and non-GitHub-Actions updates are ignored. Enabling auto-merge is not proof the PR has merged.',
+        '- **Dependabot configuration:** `.github/dependabot.yml` or `.github/dependabot.yaml` on the default branch. '
+        'Conftest evaluates the existing `github.dependabot` Rego policies: GitHub Actions entries omit `target-branch`; '
+        'other ecosystems in `main` + `develop` GitFlow repos target `develop`; and enabled updates have a valid groups object '
+        'with a version-update group unless `open-pull-requests-limit` is zero. This is not full Dependabot YAML schema validation.',
+        f'- **Dependabot PR age:** WARN when open >{args["dependabot_pr_days"]} days; FAIL when open >{VERY_OLD_DEPENDABOT_DAYS} days. Age is from PR creation.',
+        f'- **Human PR age:** WARN and scheduled reminder when open >{args["human_pr_days"]} days; no separate FAIL age threshold is currently configured. '
+        'Draft PRs are reported but not reminded.',
+        f'- **Activity:** exact whole days since the latest human-authored commit on `develop` (or default branch when no `develop` exists). '
+        f'All bot-authored commits and any commit with `OSPO` anywhere in its subject or body are ignored. Dormant warning threshold: '
+        f'>{args["dormant_days"]} days with no recent human work branch. Commits changing only paths in '
+        '`governance-only-paths.txt` are also ignored; mixed governance/project changes still count. '
+        'For repositories in `governance-activity-repositories.txt`, human OSPO commits and governance-only changes count. '
+        'Bots remain excluded. Merge commits do not refresh activity age; original ancestor commits are evaluated instead.',
+        '- **Credential scan:** TruffleHog scans selected active repositories, excluding configured repositories, for verified credentials only. '
+        'The report records counts/status only; it never stores credential values or finding locations.',
+        '- **AI use:** none. The report script uses Python, GitHub CLI/API, Conftest and TruffleHog; it does not call an AI model.',
+        '',
+    ]
+    return '\n'.join(lines)
+
+
+def html_status(status):
+    css_class = status.lower().replace('/', '-')
+    return f'<span class="status {css_class}">{html.escape(status)}</span>'
+
+
+def render_html(report):
+    args = report['parameters']
+    repos = report['repositories']
+    legend = report.get('legend', {})
+
+    def esc(value):
+        return html.escape(str(value), quote=True)
+
+    parts = [
+        '<!doctype html>', '<html lang="en">', '<head>', '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        f'<title>OSPO governance dashboard: {esc(report["organisation"])}</title>',
+        '<style>',
+        'body{margin:1rem;color:#24292f}table{border-collapse:collapse;width:100%}',
+        'th,td{border:1px solid #d0d7de;padding:.35rem;vertical-align:top;overflow-wrap:anywhere}',
+        '.matrix{table-layout:fixed}.matrix th,.matrix td{font-size:.72rem}.matrix th{font-weight:600}',
+        '.status{font-weight:700}.ok{color:#1a7f37}.warn{color:#9a6700}.fail,.error{color:#cf222e}.n-a{color:#6e7781}',
+        '.result-summary{font-size:.75em;line-height:1.35}',
+        '.cards{display:none}.card{border:1px solid #d0d7de;border-radius:.4rem;padding:.6rem;margin:.6rem 0}',
+        '.check{margin:.2rem 0}.check-name{font-weight:600}',
+        '@media(max-width:1100px){.matrix{display:none}.cards{display:block}}',
+        '</style>', '</head>', '<body>',
+        f'<h1>OSPO governance dashboard: {esc(report["organisation"])}</h1>',
+        f'<p>Generated {esc(report["generated_at"])} UTC. Mode: {esc(report["mode"])}. '
+        f'Repositories scanned: {len(repos)}. Archived/disabled skipped: {len(report["skipped"])}. '
+        f'Excluded: {esc(", ".join(report.get("excluded", [])) or "none")}.</p>',
+        f'<p>Scan branch preference: {esc(args.get("scan_branch", "auto"))}. A missing selected branch falls back to the repository default.</p>',
+        f'<p>Thresholds: human PRs &gt;{args["human_pr_days"]}d; Dependabot PRs &gt;{args["dependabot_pr_days"]}d; '
+        f'dormant after {args["dormant_days"]}d; release SBOM window {args["release_days"]}d (else latest).</p>',
+        '<h2>Summary</h2><table><thead><tr><th>Check</th><th>Counts</th></tr></thead><tbody>',
+    ]
+    for key, title in COLUMNS:
+        counts = [sum(1 for repo in repos if repo['checks'].get(key, {}).get('status') == status) for status in STATUSES]
+        rendered = '; '.join(f'{html_status(status)} {count}' for status, count in zip(STATUSES, counts) if count) or '-'
+        parts.append(f'<tr><th>{esc(title)}</th><td>{rendered}</td></tr>')
+    parts.append('</tbody></table>')
+    for title, group in repository_groups(repos):
+        parts.extend([
+            f'<h2>{esc(title)} ({len(group)})</h2>',
+            '<table class="matrix"><thead><tr><th>Repository</th>',
+        ])
+        parts.extend(f'<th>{MATRIX_HEADERS[key]}</th>' for key, _ in COLUMNS)
+        parts.append('</tr></thead><tbody>')
+        for repo in group:
+            parts.append(f'<tr><th><a href="{esc(repo["url"])}">{esc(repo["name"])}</a></th>')
+            for key, _ in COLUMNS:
+                check = repo['checks'].get(key, result(NA, '-'))
+                parts.append(f'<td>{html_status(check["status"])}<br><span class="result-summary">{esc(check["summary"])}</span></td>')
+            parts.append('</tr>')
+        parts.extend(['</tbody></table>', '<section class="cards">'])
+        for repo in group:
+            parts.append(f'<article class="card"><h3><a href="{esc(repo["url"])}">{esc(repo["name"])}</a></h3>')
+            for key, check_title in COLUMNS:
+                check = repo['checks'].get(key, result(NA, '-'))
+                parts.append(
+                    f'<p class="check"><span class="check-name">{esc(check_title)}:</span> '
+                    f'{html_status(check["status"])}<br><span class="result-summary">{esc(check["summary"])}</span></p>'
+                )
+            parts.append('</article>')
+        parts.append('</section>')
+    parts.append('<h2>Repository details</h2>')
+    for repo in repos:
+        parts.append(f'<details><summary>{esc(repo["name"])} | {esc(repo["visibility"])} | default: {esc(repo["default_branch"])} | scanned: {esc(repo.get("scan_branch", repo["default_branch"]))}</summary><ul>')
+        details = [detail for key, _ in COLUMNS for detail in repo['checks'].get(key, {}).get('details', [])
+                   if repo['checks'][key]['status'] in (WARN, FAIL, ERROR)]
+        details.extend(f'Processing error: {error}' for error in repo['errors'])
+        parts.extend(f'<li>{esc(detail)}</li>' for detail in details)
+        parts.append('</ul></details>')
+    parts.extend([
+        '<h2>Legend and check definitions</h2>',
+        f'<p>{html_status(OK)} passed; {html_status(WARN)} attention; {html_status(FAIL)} failed/action required; '
+        f'{html_status(NA)} not available/not applicable; {html_status(ERROR)} could not complete.</p>',
+        '<h3>Required governance files</h3><p>Public repositories:</p><ul>',
+    ])
+    parts.extend(f'<li><code>{esc(path)}</code></li>' for path in legend.get('public_required_files', []))
+    parts.extend(['</ul><p>Private/internal repositories:</p><ul>'])
+    parts.extend(f'<li><code>{esc(path)}</code></li>' for path in legend.get('private_required_files', []))
+    parts.extend([
+        '</ul><h3>Templates and policy</h3><ul>',
+        '<li><strong>PR template:</strong> <code>.github/PULL_REQUEST_TEMPLATE.md</code>.</li>',
+        '<li><strong>Bug report template:</strong> <code>.github/ISSUE_TEMPLATE/bug_report.md</code>.</li>',
+        '<li><strong>Feature request template:</strong> <code>.github/ISSUE_TEMPLATE/feature_request.md</code>.</li>',
+        '<li><strong>Dependabot configuration:</strong> checks <code>.github/dependabot.yml</code> or <code>.github/dependabot.yaml</code> '
+        'with the existing GitFlow target-branch and Dependabot groups Rego rules; it is not full YAML schema validation.</li>',
+        f'<li><strong>Dependabot PR age:</strong> WARN &gt;{args["dependabot_pr_days"]}d, FAIL &gt;{VERY_OLD_DEPENDABOT_DAYS}d.</li>',
+        f'<li><strong>Human PR age:</strong> WARN/reminder &gt;{args["human_pr_days"]}d; no separate FAIL age threshold is configured.</li>',
+        f'<li><strong>Repository activity:</strong> exact whole days since latest human commit; dormant warning after {args["dormant_days"]}d.</li>',
+        '<li><strong>Activity exclusions:</strong> ignores bot-authored commits, OSPO in commit subject/body, and commits changing only '
+        'paths in <code>governance-only-paths.txt</code>. Mixed governance/project changes still count. '
+        'Repositories in <code>governance-activity-repositories.txt</code> count human OSPO commits and governance-only changes; bots remain excluded. '
+        'Merge commits do not refresh activity age; original ancestor commits are evaluated instead.</li>',
+        '<li><strong>Credential scan:</strong> TruffleHog scans verified credentials only; values and locations are not recorded.</li>',
+        '<li><strong>Dependabot GitHub Actions auto-merge workflow:</strong> checks the latest applicable run and job steps. '
+        'OK requires successful auto-merge enablement; FAIL means a failed attempt; WARN means running or unconfirmed. '
+        'Human PRs and non-GitHub-Actions update skips are ignored. This does not prove the PR has merged.</li>',
+        '<li><strong>AI use:</strong> no AI/LLM is used.</li>',
+        '</ul>',
+        '<h3>OSPO workflow synchronization</h3><p>Compares each repository\'s default branch byte for byte with the workflow '
+        'manifest and workflow files published on <code>National-Node-Net/ospo-resources</code> <code>main</code>, '
+        'not <code>develop</code>. Checklists and Dependabot policy remain sourced separately from <code>develop</code>.</p>',
+        '</body></html>',
+    ])
+    return '\n'.join(parts)
+
+
+def bounded_int(value):
+    number = int(value)
+    if not 1 <= number <= 3650:
+        raise argparse.ArgumentTypeError('must be between 1 and 3650')
+    return number
+
+
+def safe_output_directory(value):
+    try:
+        root = Path.cwd().resolve()
+        output = (root / Path(value).expanduser()).resolve()
+        output.relative_to(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('must resolve to a directory inside the current working directory') from exc
+    return output
+
+
+def parse_exclusions(value, org):
+    names = set()
+    for name in re.split(r'[,\s]+', value.strip()):
+        if not name:
+            continue
+        if '/' in name:
+            owner, name = name.split('/', 1)
+            if owner.casefold() != org.casefold():
+                raise ValueError('Excluded repositories must belong to the scanned organisation')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+            raise ValueError('Excluded repositories must be repository names, not patterns or URLs')
+        names.add(name.casefold())
+    return names
+
+
+def load_exclusions(path, org):
+    return parse_exclusions('\n'.join(read_list_file(path.read_text(encoding='utf-8'))), org)
+
+
+def partition_repositories(repositories, exclude_names=()):
+    excluded_names = {name.casefold() for name in exclude_names}
+    excluded = sorted(repo['name'] for repo in repositories if repo['name'].casefold() in excluded_names)
+    active = sorted(
+        (repo for repo in repositories if not repo.get('archived') and not repo.get('disabled')
+         and repo['name'].casefold() not in excluded_names),
+        key=lambda repo: repo['name'].lower(),
+    )
+    skipped = sorted(repo['name'] for repo in repositories
+                     if (repo.get('archived') or repo.get('disabled')) and repo['name'].casefold() not in excluded_names)
+    return active, skipped, excluded
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--org', default=os.environ.get('GITHUB_REPOSITORY_OWNER'))
+    parser.add_argument('--source-root', type=Path, default=Path(__file__).resolve().parents[2],
+                        help='Checkout containing OSPO checklists and policy-as-code (develop).')
+    parser.add_argument('--workflow-source-root', type=Path, default=Path(__file__).resolve().parents[2] / 'ospo-workflows',
+                        help='Independent ospo-resources main checkout containing the published workflow manifest and files.')
+    parser.add_argument('--human-pr-days', type=bounded_int, default=30)
+    parser.add_argument('--dependabot-pr-days', type=bounded_int, default=14)
+    parser.add_argument('--dormant-days', type=bounded_int, default=180)
+    parser.add_argument('--release-days', type=bounded_int, default=90)
+    parser.add_argument('--scan-branch', choices=('auto', 'main', 'develop'), default='auto',
+                        help='Branch to scan; auto prefers develop and falls back to the repository default.')
+    parser.add_argument('--post-reminders', action='store_true',
+                        help='Comment on stale non-draft human PRs. Requires --reminder-author.')
+    parser.add_argument('--reminder-author', help='Login that posts reminders, e.g. my-app[bot].')
+    parser.add_argument('--inner-source-checklist-repo', help='Defaults to ORG/private-ospo-resources.')
+    parser.add_argument('--output-dir', default='governance-report', type=safe_output_directory)
+    parser.add_argument('--repo', action='append', help='Limit to these repository names (repeatable).')
+    parser.add_argument('--exclusions-file', type=Path, default=DEFAULT_EXCLUSIONS_FILE,
+                        help='Repository exclusion list file (one name per line; # comment lines allowed).')
+    parser.add_argument('--exclude-repos', default='', help='Additional repository names to exclude, separated by commas or whitespace.')
+    args = parser.parse_args(argv)
+    if not args.org or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*', args.org):
+        parser.error('--org is required and must be a valid organisation name')
+    if args.post_reminders and not args.reminder_author:
+        parser.error('--post-reminders requires --reminder-author')
+    try:
+        args.exclude_repos = load_exclusions(args.exclusions_file.expanduser(), args.org) | parse_exclusions(args.exclude_repos, args.org)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+    args.inner_source_checklist_repo = args.inner_source_checklist_repo or f'{args.org}/private-ospo-resources'
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    source_root = args.source_root.expanduser().resolve()
+    if not source_root.is_dir():
+        raise SystemExit(f'OSPO source checkout does not exist: {source_root}')
+    workflow_source_root = args.workflow_source_root.expanduser().resolve()
+    scanner = Scanner(args, source_root, workflow_source_root)
+    if not scanner.conftest:
+        print('WARNING: conftest not found; Dependabot policy checks will be reported as N/A.', file=sys.stderr)
+
+    all_repos = gh_api(f'orgs/{args.org}/repos?type=all&per_page=100', paginate=True)
+    if args.repo:
+        all_repos = [r for r in all_repos if r['name'] in args.repo]
+    active, skipped, excluded = partition_repositories(all_repos, args.exclude_repos)
+
+    print('Running verified-only TruffleHog scan (credential output is suppressed).', file=sys.stderr)
+    secret_results = scanner.secret_scan(active)
+    repositories = []
+    for repo in active:
+        print(f'Scanning {repo["full_name"]}', file=sys.stderr)
+        repositories.append(scanner.scan(repo, secret_results[repo['name']]))
+
+    report = {
+        'organisation': args.org,
+        'generated_at': scanner.now.strftime('%Y-%m-%d %H:%M'),
+        'completed_at': datetime.now(timezone.utc).isoformat(),
+        'mode': 'post reminders' if args.post_reminders else 'report only',
+        'parameters': {key: getattr(args, key) for key in (
+            'human_pr_days', 'dependabot_pr_days', 'dormant_days', 'release_days', 'scan_branch')},
+        'skipped': skipped,
+        'excluded': excluded,
+        'legend': {
+            'public_required_files': scanner.oss_files,
+            'private_required_files': scanner.inner_source_files(),
+        },
+        'repositories': repositories,
+    }
+    output = safe_output_directory(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    markdown = render_markdown(report)
+    (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+    (output / 'dashboard.md').write_text(markdown)
+    (output / 'dashboard.html').write_text(render_html(report))
+    summary = os.environ.get('GITHUB_STEP_SUMMARY')
+    if summary:
+        with open(summary, 'a', encoding='utf-8') as handle:
+            handle.write(markdown)
+    print(f'Wrote {output / "dashboard.md"}, {output / "dashboard.html"} and {output / "report.json"}', file=sys.stderr)
+
+    errors = [f'{r["name"]}: {e}' for r in repositories for e in r['errors']]
+    for error in errors:
+        print(f'ERROR: {error}', file=sys.stderr)
+    return 1 if errors else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

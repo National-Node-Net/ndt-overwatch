@@ -1,5 +1,13 @@
 # README
 
+[![OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/ospo-compliance.svg)](tools/governance-report/README.md)
+[![Develop activity](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/develop-activity.svg)](tools/governance-report/README.md)
+[![Last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/last-checked.svg)](tools/governance-report/README.md)
+
+The central weekly scan publishes status-only badges for every included repository, public and private, to the
+`sync/governance-badges` branch. Badges show the latest saved check, not live results; `not checked` means no
+completed scan is within the freshness window. Full reports remain separate workflow artifacts.
+
 **Repository:** `ndt-overwatch`  
 **Description:** `The ndt-overwatch repository serves as the central hub for executing organisation-wide automations across the National Digital Twin Programme (NDTP). It houses automated workflows and scripts designed to enforce governance standards, gather compliance metrics, and streamline administrative tasks.`  
 **SPDX-License-Identifier:** `Apache-2.0 AND OGL-UK-3.0`
@@ -17,6 +25,10 @@ The contents maintained in this repository are designed for use with GitHub.
 ### Supplier Register Generation
 
 An automated process to generate a consolidated, de-duplicated register of supplier organisations acknowledged across our public repositories. This register is derived from the `ACKNOWLEDGEMENTS.md` files in each repository and provides a single reference point for reporting and governance purposes.
+
+### Organisation Governance Report
+
+The `OSPO governance report` workflow scans active organisation repositories and produces Markdown, HTML, and JSON dashboards covering governance files, templates, Dependabot policy and pull requests, releases and SBOMs, repository settings, activity, workflow status, and verified TruffleHog findings. It runs weekly and can be dispatched manually after the workflow is available on the default branch. See [`tools/governance-report/README.md`](tools/governance-report/README.md) for check definitions, permissions, and manual-run guidance.
 
 ## Public Funding Acknowledgment
 
