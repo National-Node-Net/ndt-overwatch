@@ -123,7 +123,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install coverage tool
-        run: python -m pip install --disable-pip-version-check -r tools/governance-report/requirements-test.txt
+        run: python -m pip install --only-binary=:all: --disable-pip-version-check coverage==7.17.2
 
       - name: Run tests and generate Python coverage
         run: |

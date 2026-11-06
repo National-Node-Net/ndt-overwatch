@@ -769,7 +769,7 @@ class Scanner:
             paths, self.oss_files if repo.get('visibility') == 'public' else self.inner_source_files(), 'file'))
         self._run_check(entry, 'templates', lambda: check_required_paths(paths, TEMPLATE_FILES, 'template'))
         self._run_check(entry, 'dependabot_config', lambda: self.dependabot_config(
-            full, default, scan_branch, paths, state['has_develop']))
+            full, scan_branch, paths, state['has_develop']))
         self._run_check(entry, 'sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
         self._run_check(entry, 'delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
         self._run_check(entry, 'dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
@@ -923,7 +923,7 @@ class Scanner:
         work_branch['target'] = self.latest_project_commit(
             full, work_branch['name'], ref['target']['history'], since)
 
-    def dependabot_config(self, full, default, scan_branch, paths, has_develop):
+    def dependabot_config(self, full, scan_branch, paths, has_develop):
         config_path = next((path for path in DEPENDABOT_CONFIGS if path in paths), None)
         if not config_path or not self.conftest:
             return check_dependabot_config(config_path, [], evaluated=bool(self.conftest))

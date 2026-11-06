@@ -8,7 +8,7 @@ The [workflow](../../.github/workflows/governance-report.yml) runs Monday at 03:
 
 Each run adds a Markdown dashboard to the Actions summary and uploads `dashboard.md`, `dashboard.html`, and `report.json` as a 90-day artifact. The full report remains an artifact; it is not published to the badge branch.
 
-The scan publishes status-only SVG badges for every included repository under `sync/governance-badges/repositories/<repo>/`. Individual repository READMEs use the central OSPO compliance badge. The public `.github` profile uses a separate `overall-status.svg`: no develop branch on a non-main default, no releases, and no applicable auto-merge/back-merge runs count as passing; an unavailable credential scan or unreadable required setting counts as failing. The central report retains its original `N/A` results. Badges contain no findings or report data.
+The scan publishes status-only SVG badges for every included repository under `sync/governance-badges/repositories/<repo>/`. Individual repository READMEs and the public `.github` profile use the same OSPO compliance badge mapping. For badges, no required develop branch on a non-main default, no releases, and no applicable auto-merge/back-merge runs count as passing; an unavailable credential scan or unreadable required setting counts as failing. The central report retains its original `N/A` results. Badges contain no findings or report data.
 
 ## Checks
 

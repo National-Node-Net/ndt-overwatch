@@ -328,8 +328,13 @@ class ActivityTests(unittest.TestCase):
 
     def test_incomplete_commit_diff_is_not_counted_as_activity(self):
         scanner = self.scanner()
-        with patch.object(gr, 'gh_api', return_value={}) as api, self.assertRaises(gr.ApiError):
-            scanner.commit_counts_as_activity('Org/repo', {**commit(2), 'oid': 'incomplete'})
+        with patch.object(gr, 'gh_api', return_value={}) as api:
+            self.assertRaises(
+                gr.ApiError,
+                scanner.commit_counts_as_activity,
+                'Org/repo',
+                {**commit(2), 'oid': 'incomplete'},
+            )
         api.assert_called_once()
 
     def test_history_pages_past_governance_to_project_commit(self):
@@ -539,7 +544,7 @@ class OtherCheckTests(unittest.TestCase):
         with patch.object(gr, 'gh_api', return_value=content) as api, \
                 patch.object(scanner, 'run_conftest', return_value=[]) as policy:
             check = scanner.dependabot_config(
-                'Org/repo-a', 'main', 'develop', {'.github/dependabot.yml'}, True)
+                'Org/repo-a', 'develop', {'.github/dependabot.yml'}, True)
         self.assertEqual(check['status'], gr.OK)
         api.assert_called_once_with('repos/Org/repo-a/contents/.github/dependabot.yml?ref=develop', raw=True)
         policy.assert_called_once_with(content, {

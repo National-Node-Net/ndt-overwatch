@@ -19,7 +19,7 @@ AMBER = '#9a6700'
 RED = '#cf222e'
 GRAY = '#6e7781'
 GRACE = timedelta(hours=6)
-BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg', 'overall-status.svg')
+BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
 PROFILE_PASS_NA = {'develop', 'sbom', 'auto_backmerge', 'dependabot_auto_merge'}
 PROFILE_FAIL_NA = {'dependabot_config', 'delete_branch', 'secret_scan'}
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+\Z')
@@ -183,7 +183,6 @@ def generate_badges(report, now=None):
             BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', profile_status, profile_color),
             BADGE_FILENAMES[1]: _badge_svg('Develop activity', activity, activity_color),
             BADGE_FILENAMES[2]: _badge_svg('Last checked', checked, checked_color),
-            BADGE_FILENAMES[3]: _badge_svg('Overall status', profile_status, profile_color),
         }
     return badges
 
