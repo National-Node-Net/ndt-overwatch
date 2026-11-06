@@ -193,6 +193,13 @@ class ActivityTests(unittest.TestCase):
         self.assertIn('3 days since last commit on develop', check['summary'])
         self.assertIn('1 active work branches', check['summary'])
 
+    def test_classified_none_does_not_fall_back_to_unfiltered_history(self):
+        activity = self.activity([commit(1, message='fix(ci): pin workflow actions')])
+        activity['latestHumanCommit'] = None
+        check = gr.check_activity(activity, NOW, 180)
+        self.assertNotEqual(check['status'], gr.OK)
+        self.assertIn('no qualifying human commit found on develop', check['summary'])
+
     def test_commit_file_classification_is_cached(self):
         scanner = self.scanner()
         node = {**commit(7, message='fix(ci): pin workflow actions'), 'oid': 'abc'}

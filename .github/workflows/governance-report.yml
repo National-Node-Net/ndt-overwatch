@@ -10,7 +10,7 @@ on:
     branches:
       - feature/governance-report
   schedule:
-    - cron: '17 7 * * 1'
+    - cron: '0 3 * * 1'
   workflow_dispatch:
     inputs:
       excluded_repos:
@@ -119,6 +119,7 @@ jobs:
           DORMANT_DAYS: ${{ github.event.inputs.dormant_days || '180' }}
           RELEASE_DAYS: ${{ github.event.inputs.release_days || '90' }}
           EXCLUDED_REPOS: ${{ github.event.inputs.excluded_repos || vars.GOVERNANCE_EXCLUDED_REPOS || '' }}
+          STATUS_ICON_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           args=(
@@ -134,30 +135,19 @@ jobs:
           fi
           python3 tools/governance-report/governance_report.py --source-root ospo-resources --workflow-source-root ospo-workflows "${args[@]}"
 
-      - name: Generate this repository's README badges
-        if: ${{ always() && !cancelled() && (github.ref == 'refs/heads/feature/governance-report' || github.ref == 'refs/heads/main') }}
-        env:
-          BADGE_REPOSITORY: ${{ github.repository }}
-        run: |
-          python3 tools/governance-report/governance_badges.py \
-            --report governance-report/report.json \
-            --repository "$BADGE_REPOSITORY" \
-            --output-dir governance-badges
-
-      - name: Bundle locally stored status icons
-        if: ${{ always() && !cancelled() && (github.ref == 'refs/heads/feature/governance-report' || github.ref == 'refs/heads/main') }}
+      - name: Generate repository status badges
         run: |
           set -euo pipefail
-          for name in status-ok status-warn status-fail status-na status-error; do
-            cp -- ".github/badges/$name.svg" governance-badges/
-          done
+          python3 tools/governance-report/repository_badges.py \
+            --report governance-report/report.json \
+            --output-dir governance-badges
 
-      - name: Upload README badges
-        if: ${{ always() && !cancelled() && (github.ref == 'refs/heads/feature/governance-report' || github.ref == 'refs/heads/main') }}
+      - name: Upload repository badges
+        if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: governance-badges
-          path: governance-badges/*.svg
+          name: repository-badges
+          path: governance-badges/
           retention-days: 90
           if-no-files-found: error
 
@@ -172,59 +162,75 @@ jobs:
 
   publish-governance-badges:
     needs: governance-report
-    # Feature branch for testing; main for scheduled/manual production runs. Never write to main/develop.
-    if: ${{ always() && !cancelled() && (github.ref == 'refs/heads/feature/governance-report' || github.ref == 'refs/heads/main') }}
+    if: ${{ always() && !cancelled() && needs.governance-report.result == 'success' && (github.ref == 'refs/heads/feature/governance-report' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
-      - name: Download badge assets only
+      - name: Download repository badges only
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: governance-badges
-          path: ${{ runner.temp }}/governance-badges
+          name: repository-badges
+          path: ${{ runner.temp }}/repository-badges
 
       - name: Publish SVGs to the badge-only branch
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          PUBLISH_TOKEN: ${{ github.token }}
           SOURCE_REF: ${{ github.ref }}
           SOURCE_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          BADGE_SOURCE: ${{ runner.temp }}/governance-badges
+          BADGE_SOURCE: ${{ runner.temp }}/repository-badges
         run: |
           set -euo pipefail
+          case "$SOURCE_REF" in
+            refs/heads/main|refs/heads/feature/governance-report) ;;
+            *) echo 'Refusing to publish badges from an unsupported source branch.' >&2; exit 1 ;;
+          esac
           source_branch="${SOURCE_REF#refs/heads/}"
-          current_source_sha="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${source_branch}" | cut -f1)"
+          auth="$(printf 'x-access-token:%s' "$PUBLISH_TOKEN" | base64 --wrap=0)"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+
+          repository_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          current_source_sha="$(git ls-remote "$repository_url" "refs/heads/${source_branch}" | cut -f1)"
           if [[ "$current_source_sha" != "$SOURCE_SHA" ]]; then
             echo 'Source branch moved during the scan; skipping outdated badge publication.'
             exit 0
           fi
 
-          # Keep the token out of command arguments and persistent Git configuration.
-          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 --wrap=0)"
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          if [[ ! -d "$BADGE_SOURCE/repositories" ]]; then
+            echo 'Repository badge artifact is missing its repositories directory.' >&2
+            exit 1
+          fi
+          unexpected_file="$(find "$BADGE_SOURCE/repositories" -type f ! -name '*.svg' -print -quit)"
+          if [[ -n "$unexpected_file" ]]; then
+            echo 'Refusing to publish a non-SVG repository badge artifact.' >&2
+            exit 1
+          fi
+
           publish_dir="$RUNNER_TEMP/governance-badges-repository"
           mkdir -p "$publish_dir"
           git -C "$publish_dir" init --quiet --initial-branch=sync/governance-badges
           git -C "$publish_dir" config user.name 'github-actions[bot]'
           git -C "$publish_dir" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -C "$publish_dir" remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-
+          git -C "$publish_dir" remote add origin "$repository_url"
           if git -C "$publish_dir" ls-remote --exit-code origin refs/heads/sync/governance-badges >/dev/null 2>&1; then
             git -C "$publish_dir" fetch --no-tags origin refs/heads/sync/governance-badges
             git -C "$publish_dir" switch --quiet --force-create sync/governance-badges FETCH_HEAD
           fi
 
+          rm -rf -- "$publish_dir/repositories"
           mkdir -p "$publish_dir/.github/badges"
-          cp -- "$BADGE_SOURCE"/*.svg "$publish_dir/.github/badges/"
-          git -C "$publish_dir" add -- .github/badges
+          for name in ospo-compliance develop-activity last-checked; do
+            rm -f -- "$publish_dir/.github/badges/$name.svg"
+          done
+          cp -a -- "$BADGE_SOURCE/repositories" "$publish_dir/repositories"
+          git -C "$publish_dir" add -A -- repositories .github/badges
           if git -C "$publish_dir" diff --cached --quiet; then
-            echo 'Governance badge assets are unchanged.'
+            echo 'Repository governance badges are unchanged.'
             exit 0
           fi
-          git -C "$publish_dir" commit --quiet -m 'chore(OSPO): refresh governance badges'
-          # Never force-push; sync/governance-badges is not a report workflow push trigger.
+          git -C "$publish_dir" commit --quiet -m 'chore(OSPO): refresh repository governance badges'
           git -C "$publish_dir" push origin HEAD:refs/heads/sync/governance-badges

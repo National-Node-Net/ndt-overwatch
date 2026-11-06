@@ -42,9 +42,11 @@ TRANSIENT_ERROR = re.compile(r'EOF|timeout|connection reset|HTTP 5\d\d', re.IGNO
 OK, WARN, FAIL, NA, ERROR = 'OK', 'WARN', 'FAIL', 'N/A', 'ERROR'
 STATUSES = [OK, WARN, FAIL, NA, ERROR]
 STATUS_COLORS = {OK: '#1a7f37', WARN: '#9a6700', FAIL: '#cf222e', NA: '#6e7781', ERROR: '#cf222e'}
+STATUS_ICON_REF = os.environ.get('STATUS_ICON_REF') or 'main'
+if not re.fullmatch(r'[A-Za-z0-9._/-]+', STATUS_ICON_REF) or '..' in STATUS_ICON_REF:
+    raise SystemExit(f'Invalid STATUS_ICON_REF: {STATUS_ICON_REF!r}')
 STATUS_BADGE_BASE_URL = (
-    'https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/'
-    'sync/governance-badges/.github/badges'
+    f'https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/{STATUS_ICON_REF}/.github/badges'
 )
 STATUS_BADGE_FILES = {
     OK: 'status-ok.svg',
@@ -425,8 +427,11 @@ def check_activity(activity, now, days):
     include_governance_activity = activity.get('includeGovernanceActivity', False)
     source = develop or activity.get('defaultBranchRef') or {}
     history = (((source.get('target') or {}).get('history')) or {}).get('nodes', [])
-    latest_human = activity.get('latestHumanCommit') or latest_human_commit(
-        history, include_governance_activity=include_governance_activity)
+    # An explicit None means classification found no qualifying commit; do not fall back to raw history.
+    if 'latestHumanCommit' in activity:
+        latest_human = activity['latestHumanCommit']
+    else:
+        latest_human = latest_human_commit(history, include_governance_activity=include_governance_activity)
     days_since_human = age_days(latest_human['committedDate'], now) if latest_human else None
     since = now - timedelta(days=days)
     active_branches = [

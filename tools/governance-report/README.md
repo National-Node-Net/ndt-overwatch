@@ -4,7 +4,7 @@ Scans active (non-archived) repositories except those listed in `excluded-reposi
 The dashboard includes a summary, separate public and private/internal repository-by-check matrices,
 and detailed findings for each repository.
 
-The [workflow](../../.github/workflows/governance-report.yml) runs on pushes to `feature/governance-report` for pre-merge testing, weekly (Monday 07:17 UTC), and on demand.
+The [workflow](../../.github/workflows/governance-report.yml) runs on pushes to `feature/governance-report` for pre-merge testing, weekly (Monday 03:00 UTC), and on demand.
 It checks out `National-Node-Net/ospo-resources` `develop` into `ospo-resources` for the centrally maintained
 file checklists and Dependabot policies, including groups. An independent checkout of `main` into
 `ospo-workflows` supplies only the published workflow manifest and workflow files for synchronization comparisons.
@@ -13,51 +13,20 @@ The Markdown dashboard is shown in the run's job summary. The artifact includes 
 `dashboard.html` and `report.json` (kept for 90 days). The HTML dashboard has colored status text and
 a responsive matrix; it inherits the browser font and does not set a font family.
 GitHub job summaries strip inline CSS, so Markdown uses local status SVGs (`status-ok.svg`, `status-warn.svg`,
-`status-fail.svg`, `status-error.svg`, and `status-na.svg`) published on the `sync/governance-badges` branch.
+`status-fail.svg`, `status-error.svg`, and `status-na.svg`) from this repository's `.github/badges/` folder on the
+branch that ran the report (`STATUS_ICON_REF`, default `main`).
 Their raw GitHub URLs contain only fixed status labels and colors, not repository names or results; no external
 badge service is used. Result descriptions use nested sub/sup markup for two relative size reductions;
 the HTML equivalent uses 75% text. GitHub controls the final Markdown typography, not arbitrary pixel sizes.
 
 ## README badges
 
-The root README embeds three dynamic SVGs from the `sync/governance-badges` branch. The workflow publishes those
-three badges plus the five local status icons; that branch contains only badge assets. README image links are
-stable and do not require a README commit each time a report runs. The README change is made through this
-feature branch and must reach `main` through the repository's normal release process.
-
-- **OSPO compliance:** green only when every expected, applicable check passes, no processing errors exist,
-	and the qualifying `develop` commit is within the report's `dormant_days` threshold (currently 180).
-	WARN, FAIL, ERROR, missing checks, or unavailable N/A results stay amber. Only explicitly marked
-	non-applicable N/A checks (currently SBOM when there are no releases) are excluded.
-- **Develop activity badge:** whole days from the last application-related commit on `develop` to scan
-	completion. It excludes bot-authored commits (including Dependabot), merge commits, commit messages
-	containing `OSPO`, and commits changing only governance paths—even for governance repositories whose
-	separate activity check counts human OSPO/governance work. Work-branch activity cannot reset this age.
-	Missing `develop` or application-commit data shows `unknown`, not default-branch age.
-- **Last checked:** actual scan completion time in UTC, not workflow start or badge publication time.
-	The color indicates age regardless of check findings: green when the report is less than three days old,
-	amber from three through eight days inclusive, and red when it is more than eight days old. Missing or
-	invalid timestamps are red. Compliance pass/fail is shown separately.
-
-The existing report still checks governance files and workflows on each repository's default branch;
-these badges are results for `ndt-overwatch`, not a claim that the feature-branch tree passed those checks.
-No organisation-wide or private-repository findings are copied into the badge assets.
-
-After the report, `governance_badges.py` generates the images even when the report job reports processing
-errors; errors cannot produce an overall green compliance badge. If no JSON was produced, images show
-`not checked`. A separate job downloads only SVGs and uses the repository `GITHUB_TOKEN` with Contents: write
-to commit them to `sync/governance-badges`, never to `main` or `develop`. It skips if the triggering source branch
-moved and never force-pushes. The report job remains Contents: read; the settings App token remains GET-only.
-Badge-branch commits do not retrigger the report workflow.
-
-Feature-branch pushes update the badge branch for testing. Once the workflow is published to `main`, its
-weekly schedule also updates that same badge branch; this creates no recurring commits on `main`. Static SVGs
-cannot expire or increment age when a workflow stops; their color bands are recalculated only when another
-run regenerates the SVG, so read the timestamp and use separate monitoring if the workflow itself stops.
-
-`governance_badges.py` also accepts `--report PATH --repository OWNER/NAME --output-dir PATH` locally.
-Omitting `--report` generates the initial placeholders. Existing malformed reports generate placeholders
-and a nonzero exit code; a legacy report without a completion timestamp is not presented as newly checked.
+The central scan publishes three status-only SVG badges for every repository in the report, including public and
+private repositories, under `repositories/<repo-name>/` on this repository's `sync/governance-badges` branch.
+Badges expose only a status or date, never report JSON, findings, or repository details. They are refreshed on the
+weekly Monday 03:00 UTC schedule and use the same weekly-slot freshness window. The public `.github` profile uses
+links to public repositories' badge SVGs. Full Markdown, HTML, and JSON reports remain separate, 90-day workflow
+artifacts and are not published to the badge branch.
 
 ## Repository exclusions
 

@@ -1,12 +1,12 @@
 # README
 
-[![OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges/ospo-compliance.svg)](tools/governance-report/README.md#readme-badges)
-[![Develop activity](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges/develop-activity.svg)](tools/governance-report/README.md#readme-badges)
-[![Last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/.github/badges/last-checked.svg)](tools/governance-report/README.md#readme-badges)
+[![OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/ospo-compliance.svg)](tools/governance-report/README.md)
+[![Develop activity](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/develop-activity.svg)](tools/governance-report/README.md)
+[![Last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/last-checked.svg)](tools/governance-report/README.md)
 
-These self-hosted badges are published to the `sync/governance-badges` branch. Their README links are stable;
-report runs update the SVGs on that branch without creating recurring commits to `main` or changing this README.
-They show the latest saved scan, not live results; `not checked` means no scan has populated them yet.
+The central weekly scan publishes status-only badges for every included repository, public and private, to the
+`sync/governance-badges` branch. Badges show the latest saved check, not live results; `not checked` means no
+completed scan is within the freshness window. Full reports remain separate workflow artifacts.
 
 **Repository:** `ndt-overwatch`  
 **Description:** `The ndt-overwatch repository serves as the central hub for executing organisation-wide automations across the National Digital Twin Programme (NDTP). It houses automated workflows and scripts designed to enforce governance standards, gather compliance metrics, and streamline administrative tasks.`  
