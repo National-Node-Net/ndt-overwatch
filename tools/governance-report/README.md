@@ -4,11 +4,11 @@ The weekly central scan checks active repositories in National-Node-Net and publ
 
 ## Schedule and results
 
-The [workflow](../../.github/workflows/governance-report.yml) runs Monday at 03:00 UTC, on pushes to `feature/governance-report`, and on demand. Scheduled runs also remind authors about stale, non-draft human pull requests; manual runs only report.
+The [workflow](../../.github/workflows/governance-report.yml) runs Monday at 03:00 UTC, on pushes to `feature/governance-report`, and on demand. Scheduled and push runs prefer `develop`, falling back to each repository's default branch. Manual runs provide a `main`/`develop` dropdown; if the selected branch is missing, that repository's default branch is used. Each report records the branch actually scanned. Scheduled runs also remind authors about stale, non-draft human pull requests; manual runs only report.
 
 Each run adds a Markdown dashboard to the Actions summary and uploads `dashboard.md`, `dashboard.html`, and `report.json` as a 90-day artifact. The full report remains an artifact; it is not published to the badge branch.
 
-The scan publishes three status-only SVG badges for every included repository—OSPO compliance, develop activity, and last checked—to `sync/governance-badges/repositories/<repo>/`. The public `.github` profile displays public repositories only. Badges contain no findings or report data.
+The scan publishes status-only SVG badges for every included repository under `sync/governance-badges/repositories/<repo>/`. Individual repository READMEs use the central OSPO compliance badge. The public `.github` profile uses a separate `overall-status.svg`: no develop branch on a non-main default, no releases, and no applicable auto-merge/back-merge runs count as passing; an unavailable credential scan or unreadable required setting counts as failing. The central report retains its original `N/A` results. Badges contain no findings or report data.
 
 ## Checks
 

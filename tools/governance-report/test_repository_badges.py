@@ -64,7 +64,7 @@ class ComplianceBadgeTests(unittest.TestCase):
         repository = make_repository()
         repository['checks']['sbom'] = {'status': gr.NA, 'applicable': False}
         badges = rb.generate_badges(make_report([repository]), NOW)[repository['name']]
-        self.assertEqual(badge_value(badges['ospo-compliance.svg']), 'all checks passed')
+        self.assertEqual(badge_value(badges['ospo-compliance.svg']), 'pass')
         self.assertEqual(badge_color(badges['ospo-compliance.svg']), rb.GREEN)
 
     def test_warn_or_fail_requires_attention(self):
@@ -73,8 +73,9 @@ class ComplianceBadgeTests(unittest.TestCase):
                 repository = make_repository()
                 repository['checks']['files'] = {'status': status}
                 badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['ospo-compliance.svg']
-                self.assertEqual(badge_value(badge), 'attention needed')
-                self.assertEqual(badge_color(badge), rb.AMBER)
+                expected, color = ('attention', rb.AMBER) if status == gr.WARN else ('fail', rb.RED)
+                self.assertEqual(badge_value(badge), expected)
+                self.assertEqual(badge_color(badge), color)
 
     def test_error_missing_invalid_and_applicability_unknowns_are_gray(self):
         cases = {
@@ -103,6 +104,38 @@ class ComplianceBadgeTests(unittest.TestCase):
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['ospo-compliance.svg']
         self.assertEqual(badge_value(badge), 'unknown')
         self.assertNotIn('private processing detail', badge)
+
+
+class ProfileStatusTests(unittest.TestCase):
+    def test_profile_status_maps_expected_not_applicable_checks(self):
+        cases = (
+            ('develop', {'status': gr.NA}, 'pass', rb.GREEN),
+            ('sbom', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
+            ('auto_backmerge', {'status': gr.NA}, 'pass', rb.GREEN),
+            ('dependabot_auto_merge', {'status': gr.NA}, 'pass', rb.GREEN),
+            ('secret_scan', {'status': gr.NA}, 'fail', rb.RED),
+            ('secret_scan', {'status': gr.ERROR}, 'fail', rb.RED),
+            ('dependabot_config', {'status': gr.NA}, 'fail', rb.RED),
+            ('delete_branch', {'status': gr.NA}, 'fail', rb.RED),
+            ('files', {'status': gr.NA}, 'unknown', rb.GRAY),
+            ('sbom', {'status': gr.NA, 'applicable': True}, 'unknown', rb.GRAY),
+        )
+        for key, check, expected, color in cases:
+            with self.subTest(check=key, status=check):
+                repository = make_repository()
+                repository['checks'][key] = check
+                self.assertEqual(rb._profile_status(repository), (expected, color))
+
+    def test_known_failure_is_not_hidden_by_unavailable_check(self):
+        repository = make_repository()
+        repository['checks']['files'] = {'status': gr.FAIL}
+        repository['checks']['auto_backmerge'] = {'status': gr.NA}
+        self.assertEqual(rb._profile_status(repository), ('fail', rb.RED))
+
+    def test_unknown_remains_unknown_when_no_failure_exists(self):
+        repository = make_repository()
+        repository['checks']['files'] = {'status': gr.ERROR}
+        self.assertEqual(rb._profile_status(repository), ('unknown', rb.GRAY))
 
 
 class ActivityBadgeTests(unittest.TestCase):
@@ -197,7 +230,7 @@ class OutputTests(unittest.TestCase):
                 result = rb.write_badges(make_report(repositories), output, NOW)
             self.assertEqual(len(result), 2)
             files = sorted(path.relative_to(output).as_posix() for path in output.rglob('*') if path.is_file())
-            self.assertEqual(len(files), 6)
+            self.assertEqual(len(files), len(rb.BADGE_FILENAMES) * len(repositories))
             self.assertTrue(all(path.endswith('.svg') for path in files))
             self.assertFalse(any(path.endswith('.json') for path in files))
             self.assertFalse(stale.exists())

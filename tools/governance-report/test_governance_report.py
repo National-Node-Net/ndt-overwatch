@@ -196,8 +196,19 @@ class ActivityTests(unittest.TestCase):
         scanner._activity_commit_cache = {}
         scanner.org = 'Org'
         scanner.now = NOW
-        scanner.args = SimpleNamespace(dormant_days=180)
+        scanner.args = SimpleNamespace(dormant_days=180, scan_branch='auto')
         return scanner
+
+    def test_activity_source_resolves_auto_manual_and_missing_branches(self):
+        develop = {'target': {'history': {'nodes': ['develop']}}}
+        main = {'target': {'history': {'nodes': ['main']}}}
+        default = {'target': {'history': {'nodes': ['default']}}}
+        activity = {'develop': develop, 'main': main, 'defaultBranchRef': default}
+        self.assertEqual(gr.Scanner.activity_source(activity, 'main', 'auto'), ('develop', develop))
+        self.assertEqual(gr.Scanner.activity_source(activity, 'main', 'main'), ('main', main))
+        self.assertEqual(gr.Scanner.activity_source(activity, 'main', 'develop'), ('develop', develop))
+        self.assertEqual(gr.Scanner.activity_source({'develop': None, 'main': None, 'defaultBranchRef': default},
+                                                    'default', 'develop'), ('default', default))
 
     def test_governance_only_paths_and_mixed_changes(self):
         rules = self.scanner().governance_paths
@@ -387,6 +398,21 @@ class ActivityTests(unittest.TestCase):
         self.assertIn('3 days since last commit on main', check['summary'])
         self.assertNotIn('on develop', check['summary'])
 
+    def test_activity_uses_selected_main_when_develop_exists(self):
+        activity = self.activity([commit(100)], refs=[])
+        activity['scanBranch'] = 'main'
+        activity['scanRef'] = {'target': {'history': {'nodes': [commit(5)]}}}
+        activity['latestHumanCommit'] = commit(5)
+        check = gr.check_activity(activity, NOW, 180)
+        self.assertIn('5 days since last commit on main', check['summary'])
+
+    def test_parse_args_scan_branch_defaults_to_auto_and_accepts_dropdown_choices(self):
+        self.assertEqual(gr.parse_args(['--org', 'org']).scan_branch, 'auto')
+        for branch in ('main', 'develop'):
+            self.assertEqual(gr.parse_args(['--org', 'org', '--scan-branch', branch]).scan_branch, branch)
+        with patch('sys.stderr'), self.assertRaises(SystemExit):
+            gr.parse_args(['--org', 'org', '--scan-branch', 'release'])
+
     def test_exact_days_since_human_commit_ignores_ospo_and_bot_commits(self):
         commits = [
             commit(2, 'Dependabot[bot]', 'dependabot[bot]'),
@@ -491,6 +517,35 @@ class WorkflowSourceTests(unittest.TestCase):
 
 
 class OtherCheckTests(unittest.TestCase):
+    def test_scan_state_reads_tree_from_resolved_scan_branch(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        repo = {'name': 'repo-a', 'full_name': 'Org/repo-a', 'default_branch': 'main'}
+        entry = {'errors': []}
+        activity = {
+            'scanBranch': 'develop', 'develop': {'target': {}}, 'latestHumanCommit': {},
+            'latestApplicationCommit': {}, 'activityBranch': 'develop',
+        }
+        with patch.object(scanner, 'repository_activity', return_value=activity), \
+                patch.object(gr, 'gh_api', return_value={'tree': []}) as api:
+            state = scanner._load_scan_state(repo, entry)
+        self.assertEqual(state['scan_branch'], 'develop')
+        self.assertEqual(entry['scan_branch'], 'develop')
+        self.assertIn('git/trees/develop?', api.call_args.args[0])
+
+    def test_dependabot_config_is_fetched_from_selected_scan_branch(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        scanner.conftest = 'conftest'
+        content = 'version: 2\nupdates: []\n'
+        with patch.object(gr, 'gh_api', return_value=content) as api, \
+                patch.object(scanner, 'run_conftest', return_value=[]) as policy:
+            check = scanner.dependabot_config(
+                'Org/repo-a', 'main', 'develop', {'.github/dependabot.yml'}, True)
+        self.assertEqual(check['status'], gr.OK)
+        api.assert_called_once_with('repos/Org/repo-a/contents/.github/dependabot.yml?ref=develop', raw=True)
+        policy.assert_called_once_with(content, {
+            'repository': {'defaultBranch': 'develop', 'hasDevelopBranch': True},
+        })
+
     def test_local_history_scan_uses_reader_token_for_clone_only(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
         repo = {'name': 'repo-a', 'full_name': 'Org/repo-a'}
@@ -536,6 +591,7 @@ class OtherCheckTests(unittest.TestCase):
 
     def test_scanner_error_is_processing_error(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
+        scanner.org = 'Org'
         repo = {'name': 'repo-a', 'full_name': 'Org/repo-a', 'default_branch': 'main', 'html_url': 'https://example.invalid'}
         with patch.object(gr, 'gh_api', side_effect=gr.ApiError('unavailable')):
             entry = scanner.scan(repo, gr.check_secret_scan(0, error='scanner failed'))

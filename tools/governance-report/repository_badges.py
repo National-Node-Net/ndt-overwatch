@@ -12,14 +12,16 @@ from datetime import datetime, time, timedelta, timezone
 from html import escape
 from pathlib import Path
 
-from governance_report import COLUMNS, ERROR, FAIL, NA, STATUSES, WARN, safe_output_directory
+from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN, safe_output_directory
 
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
 RED = '#cf222e'
 GRAY = '#6e7781'
 GRACE = timedelta(hours=6)
-BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
+BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg', 'overall-status.svg')
+PROFILE_PASS_NA = {'develop', 'sbom', 'auto_backmerge', 'dependabot_auto_merge'}
+PROFILE_FAIL_NA = {'dependabot_config', 'delete_branch', 'secret_scan'}
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+\Z')
 
 
@@ -94,29 +96,38 @@ def _badge_svg(label, value, color):
 '''
 
 
-def _check_status(check):
+def _profile_check_status(key, check):
     if not isinstance(check, dict):
         return 'unknown'
     status = check.get('status')
     applicable = check.get('applicable', True)
     if not isinstance(applicable, bool):
         return 'unknown'
-    if status == NA and applicable is False:
-        return None
-    if applicable is False or status not in STATUSES or status in (NA, ERROR):
+    if status == NA:
+        if key in PROFILE_PASS_NA and (key != 'sbom' or applicable is False):
+            return OK
+        if key in PROFILE_FAIL_NA:
+            return FAIL
         return 'unknown'
-    return status
+    if applicable is False or status not in STATUSES:
+        return 'unknown'
+    if status == ERROR and key == 'secret_scan':
+        return FAIL
+    return 'unknown' if status == ERROR else status
 
 
-def _compliance(repository):
-    checks = repository['checks']
-    statuses = [_check_status(checks.get(key)) for key, _title in COLUMNS]
-    known_statuses = [status for status in statuses if status is not None]
-    if repository.get('errors') or 'unknown' in known_statuses or not known_statuses:
+def _profile_status(repository):
+    statuses = [
+        _profile_check_status(key, repository['checks'].get(key))
+        for key, _title in COLUMNS
+    ]
+    if FAIL in statuses:
+        return 'fail', RED
+    if 'unknown' in statuses or repository.get('errors'):
         return 'unknown', GRAY
-    if any(status in (WARN, FAIL) for status in known_statuses):
-        return 'attention needed', AMBER
-    return 'all checks passed', GREEN
+    if WARN in statuses:
+        return 'attention', AMBER
+    return 'pass', GREEN
 
 
 def _activity(repository, completed_at, threshold):
@@ -165,13 +176,14 @@ def generate_badges(report, now=None):
 
     badges = {}
     for repository in report['repositories']:
-        compliance, compliance_color = _compliance(repository)
+        profile_status, profile_color = _profile_status(repository)
         activity, activity_color = _activity(repository, completed_at, threshold)
         checked, checked_color = _last_checked(completed_at, current_time)
         badges[repository['name']] = {
-            BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', compliance, compliance_color),
+            BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', profile_status, profile_color),
             BADGE_FILENAMES[1]: _badge_svg('Develop activity', activity, activity_color),
             BADGE_FILENAMES[2]: _badge_svg('Last checked', checked, checked_color),
+            BADGE_FILENAMES[3]: _badge_svg('Overall status', profile_status, profile_color),
         }
     return badges
 

@@ -109,6 +109,23 @@ query($owner: String!, $name: String!) {
                 }
             }
     }
+    main: ref(qualifiedName: "refs/heads/main") {
+            target {
+                ... on Commit {
+                    history(first: 100) {
+                        nodes {
+                            oid
+                            committedDate
+                            messageHeadline
+                            messageBody
+                            parents(first: 2) { totalCount }
+                            author { name user { login __typename } }
+                        }
+                        pageInfo { hasNextPage endCursor }
+                    }
+                }
+            }
+    }
     defaultBranchRef {
             target {
                 ... on Commit {
@@ -447,9 +464,9 @@ def check_dependabot_auto_merge(workflow_run, jobs):
 
 def check_activity(activity, now, days):
     develop = activity.get('develop')
-    branch_name = 'develop' if develop else activity.get('activityBranch', 'default branch')
+    branch_name = activity.get('scanBranch') or activity.get('activityBranch') or ('develop' if develop else 'default branch')
     include_governance_activity = activity.get('includeGovernanceActivity', False)
-    source = develop or activity.get('defaultBranchRef') or {}
+    source = activity.get('scanRef') or develop or activity.get('defaultBranchRef') or {}
     history = (((source.get('target') or {}).get('history')) or {}).get('nodes', [])
     # An explicit None means classification found no qualifying commit; do not fall back to raw history.
     if 'latestHumanCommit' in activity:
@@ -696,7 +713,8 @@ class Scanner:
     def _new_scan_entry(repo, secret_result):
         entry = {
             'name': repo['name'], 'url': repo['html_url'], 'visibility': repo.get('visibility', 'unknown'),
-            'default_branch': repo['default_branch'], 'fork': repo.get('fork', False),
+            'default_branch': repo['default_branch'], 'scan_branch': repo['default_branch'],
+            'fork': repo.get('fork', False),
             'checks': {'secret_scan': secret_result}, 'errors': [],
         }
         if secret_result['status'] in (ERROR, NA):
@@ -706,11 +724,13 @@ class Scanner:
     def _load_scan_state(self, repo, entry):
         full = repo['full_name']
         default = repo['default_branch']
-        tree = gh_api(f'repos/{full}/git/trees/{default}?recursive=1')
+        activity = self.repository_activity(full, default)
+        scan_branch = activity.get('scanBranch', default)
+        entry['scan_branch'] = scan_branch
+        tree = gh_api(f'repos/{full}/git/trees/{scan_branch}?recursive=1')
         blobs = {item['path']: item['sha'] for item in tree['tree'] if item['type'] == 'blob'}
         if tree.get('truncated'):
             entry['errors'].append('tree: listing truncated, file checks may be incomplete')
-        activity = self.repository_activity(full, default)
         latest = activity.get('latestHumanCommit') or {}
         latest_application = activity.get('latestApplicationCommit') or {}
         entry['activity'] = {
@@ -718,7 +738,10 @@ class Scanner:
             'last_commit_at': latest.get('committedDate'),
             'last_application_commit_at': latest_application.get('committedDate'),
         }
-        return {'blobs': blobs, 'activity': activity, 'has_develop': activity.get('develop') is not None}
+        return {
+            'blobs': blobs, 'activity': activity, 'scan_branch': scan_branch,
+            'has_develop': activity.get('develop') is not None,
+        }
 
     @staticmethod
     def _mark_scan_incomplete(entry, exc):
@@ -738,13 +761,15 @@ class Scanner:
     def _run_repository_checks(self, repo, state, entry):
         full = repo['full_name']
         default = repo['default_branch']
+        scan_branch = state['scan_branch']
         blobs = state['blobs']
         paths = set(blobs)
         self._run_check(entry, 'develop', lambda: check_develop(default, state['has_develop']))
         self._run_check(entry, 'files', lambda: check_required_paths(
             paths, self.oss_files if repo.get('visibility') == 'public' else self.inner_source_files(), 'file'))
         self._run_check(entry, 'templates', lambda: check_required_paths(paths, TEMPLATE_FILES, 'template'))
-        self._run_check(entry, 'dependabot_config', lambda: self.dependabot_config(full, default, paths, state['has_develop']))
+        self._run_check(entry, 'dependabot_config', lambda: self.dependabot_config(
+            full, default, scan_branch, paths, state['has_develop']))
         self._run_check(entry, 'sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
         self._run_check(entry, 'delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
         self._run_check(entry, 'dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
@@ -843,12 +868,15 @@ class Scanner:
             raise ApiError('Activity branch disappeared during history scan')
         return ref['target']['history']
 
-    def repository_activity(self, full, default):
+    def repository_activity(self, full, default, scan_branch=None):
         data = gh_api('graphql', fields={
             'query': GRAPHQL_ACTIVITY, 'owner': self.org, 'name': full.split('/', 1)[1],
         })
         activity = data['data']['repository']
-        branch, source = self.activity_source(activity, default)
+        requested_branch = scan_branch or self.args.scan_branch
+        branch, source = self.activity_source(activity, default, requested_branch)
+        activity['scanBranch'] = branch
+        activity['scanRef'] = source
         include_governance_activity = self.includes_governance_activity(full, None)
         activity['activityBranch'] = branch
         activity['includeGovernanceActivity'] = include_governance_activity
@@ -861,9 +889,13 @@ class Scanner:
         return activity
 
     @staticmethod
-    def activity_source(activity, default):
-        develop = activity.get('develop')
-        return ('develop', develop) if develop else (default, activity.get('defaultBranchRef') or {})
+    def activity_source(activity, default, requested_branch='auto'):
+        if requested_branch == 'auto':
+            requested_branch = 'develop' if activity.get('develop') else default
+        source = activity.get(requested_branch)
+        if source is not None:
+            return requested_branch, source
+        return default, activity.get('defaultBranchRef') or {}
 
     def latest_application_commit(self, full, branch, history, include_governance_activity, latest_human):
         if not include_governance_activity:
@@ -891,12 +923,12 @@ class Scanner:
         work_branch['target'] = self.latest_project_commit(
             full, work_branch['name'], ref['target']['history'], since)
 
-    def dependabot_config(self, full, default, paths, has_develop):
+    def dependabot_config(self, full, default, scan_branch, paths, has_develop):
         config_path = next((path for path in DEPENDABOT_CONFIGS if path in paths), None)
         if not config_path or not self.conftest:
             return check_dependabot_config(config_path, [], evaluated=bool(self.conftest))
-        content = gh_api(f'repos/{full}/contents/{config_path}?ref={default}', raw=True)
-        metadata = {'repository': {'defaultBranch': default, 'hasDevelopBranch': has_develop}}
+        content = gh_api(f'repos/{full}/contents/{config_path}?ref={scan_branch}', raw=True)
+        metadata = {'repository': {'defaultBranch': scan_branch, 'hasDevelopBranch': has_develop}}
         return check_dependabot_config(config_path, self.run_conftest(content, metadata))
 
     def repo_setting(self, full, state, setting):
@@ -1001,6 +1033,7 @@ def render_markdown(report):
         '',
         f'Generated {report["generated_at"]} UTC. Mode: {report["mode"]}. Repositories scanned: {len(repos)}. '
         f'Archived/disabled skipped: {len(report["skipped"])}.',
+        f'Scan branch preference: `{args.get("scan_branch", "auto")}`. `auto` prefers `develop` and falls back to the repository default.',
         f'Excluded by report policy: {", ".join(report.get("excluded", [])) or "none"}.',
         '',
         f'Thresholds: human PRs >{args["human_pr_days"]}d, Dependabot PRs >{args["dependabot_pr_days"]}d, '
@@ -1041,7 +1074,7 @@ def render_markdown(report):
     lines += ['', 'Status details are available in each repository section below.', '', '## Repository details', '']
     for repo in repos:
         lines.append(
-            f'<details><summary>{cell(repo["name"])} | {repo["visibility"]} | default: {cell(repo["default_branch"])}</summary>'
+            f'<details><summary>{cell(repo["name"])} | {repo["visibility"]} | default: {cell(repo["default_branch"])} | scanned: {cell(repo.get("scan_branch", repo["default_branch"]))}</summary>'
         )
         details = [d for key, _ in COLUMNS for d in repo['checks'].get(key, {}).get('details', [])
                    if repo['checks'][key]['status'] in (WARN, FAIL, ERROR)]
@@ -1123,6 +1156,7 @@ def render_html(report):
         f'<p>Generated {esc(report["generated_at"])} UTC. Mode: {esc(report["mode"])}. '
         f'Repositories scanned: {len(repos)}. Archived/disabled skipped: {len(report["skipped"])}. '
         f'Excluded: {esc(", ".join(report.get("excluded", [])) or "none")}.</p>',
+        f'<p>Scan branch preference: {esc(args.get("scan_branch", "auto"))}. A missing selected branch falls back to the repository default.</p>',
         f'<p>Thresholds: human PRs &gt;{args["human_pr_days"]}d; Dependabot PRs &gt;{args["dependabot_pr_days"]}d; '
         f'dormant after {args["dormant_days"]}d; release SBOM window {args["release_days"]}d (else latest).</p>',
         '<h2>Summary</h2><table><thead><tr><th>Check</th><th>Counts</th></tr></thead><tbody>',
@@ -1158,7 +1192,7 @@ def render_html(report):
         parts.append('</section>')
     parts.append('<h2>Repository details</h2>')
     for repo in repos:
-        parts.append(f'<details><summary>{esc(repo["name"])} | {esc(repo["visibility"])} | default: {esc(repo["default_branch"])}</summary><ul>')
+        parts.append(f'<details><summary>{esc(repo["name"])} | {esc(repo["visibility"])} | default: {esc(repo["default_branch"])} | scanned: {esc(repo.get("scan_branch", repo["default_branch"]))}</summary><ul>')
         details = [detail for key, _ in COLUMNS for detail in repo['checks'].get(key, {}).get('details', [])
                    if repo['checks'][key]['status'] in (WARN, FAIL, ERROR)]
         details.extend(f'Processing error: {error}' for error in repo['errors'])
@@ -1261,6 +1295,8 @@ def parse_args(argv):
     parser.add_argument('--dependabot-pr-days', type=bounded_int, default=14)
     parser.add_argument('--dormant-days', type=bounded_int, default=180)
     parser.add_argument('--release-days', type=bounded_int, default=90)
+    parser.add_argument('--scan-branch', choices=('auto', 'main', 'develop'), default='auto',
+                        help='Branch to scan; auto prefers develop and falls back to the repository default.')
     parser.add_argument('--post-reminders', action='store_true',
                         help='Comment on stale non-draft human PRs. Requires --reminder-author.')
     parser.add_argument('--reminder-author', help='Login that posts reminders, e.g. my-app[bot].')
@@ -1310,7 +1346,8 @@ def main(argv=None):
         'generated_at': scanner.now.strftime('%Y-%m-%d %H:%M'),
         'completed_at': datetime.now(timezone.utc).isoformat(),
         'mode': 'post reminders' if args.post_reminders else 'report only',
-        'parameters': {key: getattr(args, key) for key in ('human_pr_days', 'dependabot_pr_days', 'dormant_days', 'release_days')},
+        'parameters': {key: getattr(args, key) for key in (
+            'human_pr_days', 'dependabot_pr_days', 'dormant_days', 'release_days', 'scan_branch')},
         'skipped': skipped,
         'excluded': excluded,
         'legend': {
