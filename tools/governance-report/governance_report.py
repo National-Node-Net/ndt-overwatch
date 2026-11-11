@@ -67,7 +67,7 @@ COLUMNS = [
     ('secret_scan', 'TruffleHog verified credential scan'),
     ('sbom', 'Release SBOM asset'),
     ('delete_branch', 'Automatic branch deletion'),
-    ('dependabot_auto_merge', 'Dependabot GitHub Actions auto-merge workflow'),
+    ('dependabot_auto_merge', 'Current Dependabot GitHub Actions auto-merge state'),
     ('activity', 'Recent repository activity'),
     ('workflows', 'OSPO workflow synchronization'),
     ('auto_backmerge', 'Main-to-develop back-merge'),
@@ -83,7 +83,7 @@ MATRIX_HEADERS = {
     'secret_scan': 'Verified credential<br>scan',
     'sbom': 'Release SBOM<br>asset',
     'delete_branch': 'Automatic branch<br>deletion',
-    'dependabot_auto_merge': 'Dependabot GitHub Actions<br>auto-merge workflow',
+    'dependabot_auto_merge': 'Current Dependabot Actions<br>auto-merge state',
     'activity': 'Recent repository<br>activity',
     'workflows': 'OSPO workflow<br>synchronization',
     'auto_backmerge': 'Main-to-develop<br>back-merge',
@@ -448,18 +448,50 @@ def check_dependabot_auto_merge(workflow_run, jobs):
     number = workflow_run.get('run_number', workflow_run['id'])
     date = workflow_run.get('created_at', '')[:10]
     link = f'[run #{number}]({workflow_run["html_url"]})'
+    pull_numbers = [str(pr['number']) for pr in workflow_run.get('pull_requests', []) if pr.get('number')]
+    pull_reference = f' for PR #{", #".join(pull_numbers)}' if pull_numbers else ''
     details = [f'Dependabot auto-merge workflow: {workflow_run["html_url"]}']
     if workflow_run.get('status') != 'completed':
-        return result(WARN, f'{workflow_run.get("status", "pending")} {link} ({date})', details)
+        return result(WARN, f'{workflow_run.get("status", "pending")}{pull_reference} {link} ({date})', details)
     conclusion = workflow_run.get('conclusion')
     failed_steps = [step['name'] for step in steps if step.get('conclusion') in ('failure', 'timed_out')]
     if conclusion in ('failure', 'timed_out', 'startup_failure') or failed_steps:
         details.extend(f'Failed step: {name}' for name in failed_steps)
-        return result(FAIL, f'failed {link} ({date})', details)
+        return result(FAIL, f'failed{pull_reference} {link} ({date})', details)
     enable = next((step for step in steps if step['name'] == 'Enable auto-merge for the pull request'), None)
     if conclusion == 'success' and enable and enable.get('conclusion') == 'success':
-        return result(OK, f'auto-merge enabled by {link} ({date})', details)
-    return result(WARN, f'{conclusion or "unknown"}; auto-merge not confirmed ({date})', details)
+        return result(OK, f'auto-merge step succeeded{pull_reference} in {link} ({date})', details)
+    return result(WARN, f'{conclusion or "unknown"}; auto-merge step not confirmed{pull_reference} ({date})', details)
+
+
+def actions_history_error(exc):
+    """Describe why Actions history could not be inspected without claiming a pass."""
+    message = str(exc)
+    if re.search(r'Actions is disabled', message, re.IGNORECASE):
+        return result(FAIL, 'GitHub Actions is disabled', [
+            'Enable GitHub Actions in the repository settings before workflow history can be checked.',
+        ])
+
+    match = re.search(r'HTTP (\d{3})', message, re.IGNORECASE)
+    code = match.group(1) if match else None
+    if code == '403' or re.search(r'Resource not accessible by integration', message, re.IGNORECASE):
+        return result(ERROR, f'Actions history access denied{f" (HTTP {code})" if code else ""}', [
+            'Grant the reader GitHub App Actions: read permission and confirm the repository is included in its installation.',
+        ])
+    if code == '404':
+        return result(ERROR, 'Actions history returned HTTP 404', [
+            'GitHub can conceal inaccessible private resources as 404; verify Actions: read, App installation scope, and the workflow on the default branch.',
+        ])
+    return result(ERROR, f'Actions history request failed{f" (HTTP {code})" if code else ""}', [
+        'The reader GitHub App could not retrieve workflow history. Check the Actions API response and App installation permissions.',
+    ])
+
+
+def is_github_actions_dependabot_pr(pr):
+    return (
+        (pr.get('user') or {}).get('login') == DEPENDABOT
+        and ((pr.get('head') or {}).get('ref') or '').startswith('dependabot/github_actions/')
+    )
 
 
 def check_activity(activity, now, days):
@@ -705,8 +737,9 @@ class Scanner:
         except (ApiError, subprocess.TimeoutExpired, KeyError, TypeError) as exc:
             self._mark_scan_incomplete(entry, exc)
             return entry
-        self._run_repository_checks(repo, state, entry)
-        self._run_pull_request_checks(repo, entry)
+        prs = self._load_open_pull_requests(repo, entry)
+        self._run_repository_checks(repo, state, entry, prs)
+        self._run_pull_request_checks(repo, entry, prs)
         return entry
 
     @staticmethod
@@ -740,6 +773,7 @@ class Scanner:
         }
         return {
             'blobs': blobs, 'activity': activity, 'scan_branch': scan_branch,
+            'blobs_truncated': tree.get('truncated', False),
             'has_develop': activity.get('develop') is not None,
         }
 
@@ -758,7 +792,29 @@ class Scanner:
             entry['checks'][key] = result(ERROR, 'error', [str(exc)[:300]])
             entry['errors'].append(f'{key}: {str(exc)[:300]}')
 
-    def _run_repository_checks(self, repo, state, entry):
+    def _load_open_pull_requests(self, repo, entry):
+        full = repo['full_name']
+        try:
+            return gh_api(f'repos/{full}/pulls?state=open&per_page=100', token=self.pr_token, paginate=True)
+        except (ApiError, subprocess.TimeoutExpired) as exc:
+            message = str(exc)[:300]
+            for key in ('dependabot_prs', 'human_prs'):
+                entry['checks'][key] = result(ERROR, 'error', [message])
+            entry['errors'].append(f'pulls: {message}')
+            return None
+
+    @staticmethod
+    def _default_branch_blobs(full, default, state):
+        if state['scan_branch'] == default:
+            if state.get('blobs_truncated'):
+                raise ApiError(f'repos/{full}/git/trees/{default}: default-branch tree listing truncated')
+            return state['blobs']
+        tree = gh_api(f'repos/{full}/git/trees/{default}?recursive=1')
+        if tree.get('truncated'):
+            raise ApiError(f'repos/{full}/git/trees/{default}: default-branch tree listing truncated')
+        return {item['path']: item['sha'] for item in tree['tree'] if item['type'] == 'blob'}
+
+    def _run_repository_checks(self, repo, state, entry, prs):
         full = repo['full_name']
         default = repo['default_branch']
         scan_branch = state['scan_branch']
@@ -772,19 +828,23 @@ class Scanner:
             full, scan_branch, paths, state['has_develop']))
         self._run_check(entry, 'sbom', lambda: check_sbom(gh_api(f'repos/{full}/releases?per_page=100'), self.now, self.args.release_days))
         self._run_check(entry, 'delete_branch', lambda: check_delete_branch(self.repo_setting(full, state, 'delete_branch_on_merge')))
-        self._run_check(entry, 'dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, paths))
         self._run_check(entry, 'activity', lambda: check_activity(state['activity'], self.now, self.args.dormant_days))
-        self._run_check(entry, 'workflows', lambda: check_workflows(blobs, self.expected_workflows))
-        self._run_check(entry, 'auto_backmerge', lambda: self.auto_backmerge(full, paths))
-
-    def _run_pull_request_checks(self, repo, entry):
-        full = repo['full_name']
         try:
-            prs = gh_api(f'repos/{full}/pulls?state=open&per_page=100', token=self.pr_token, paginate=True)
-        except (ApiError, subprocess.TimeoutExpired) as exc:
-            for key in ('dependabot_prs', 'human_prs'):
-                entry['checks'][key] = result(ERROR, 'error', [str(exc)[:300]])
-            entry['errors'].append(f'pulls: {str(exc)[:300]}')
+            default_blobs = self._default_branch_blobs(full, default, state)
+        except (ApiError, subprocess.TimeoutExpired, KeyError, TypeError) as exc:
+            message = str(exc)[:300]
+            for key in ('workflows', 'dependabot_auto_merge', 'auto_backmerge'):
+                entry['checks'][key] = result(ERROR, 'default-branch files unavailable', [message])
+                entry['errors'].append(f'{key}: {message}')
+        else:
+            default_paths = set(default_blobs)
+            self._run_check(entry, 'workflows', lambda: check_workflows(default_blobs, self.expected_workflows))
+            self._run_check(entry, 'dependabot_auto_merge', lambda: self.dependabot_auto_merge(full, default_paths, prs))
+            self._run_check(entry, 'auto_backmerge', lambda: self.auto_backmerge(full, default_paths))
+
+    def _run_pull_request_checks(self, repo, entry, prs):
+        full = repo['full_name']
+        if prs is None:
             return
         self._run_check(entry, 'dependabot_prs', lambda: check_dependabot_prs(prs, self.now, self.args.dependabot_pr_days))
         self._run_check(entry, 'human_prs', lambda: check_human_prs(
@@ -895,6 +955,8 @@ class Scanner:
         source = activity.get(requested_branch)
         if source is not None:
             return requested_branch, source
+        if requested_branch == 'develop':
+            raise ApiError('Requested develop scan branch does not exist; refusing to fall back to the default branch')
         return default, activity.get('defaultBranchRef') or {}
 
     def latest_application_commit(self, full, branch, history, include_governance_activity, latest_human):
@@ -943,38 +1005,124 @@ class Scanner:
         try:
             runs = gh_api(f'repos/{full}/actions/workflows/auto-back-merge.yml/runs?per_page=100')
         except ApiError as exc:
-            if re.search(r'HTTP 403|HTTP 404|Resource not accessible by integration|Actions is disabled', str(exc), re.IGNORECASE):
-                return result(
-                    NA, 'Actions run history unavailable',
-                    ['The repository reader App needs Actions: read permission to inspect workflow runs.'],
-                )
-            raise
+            return actions_history_error(exc)
         return check_auto_backmerge(True, runs.get('workflow_runs', []))
 
-    def dependabot_auto_merge(self, full, paths):
+    def dependabot_auto_merge(self, full, paths, prs):
         workflow = 'auto-merge-dependabot-pull-requests.yml'
         if f'.github/workflows/{workflow}' not in paths:
             return result(FAIL, 'workflow missing from default branch', [f'Missing .github/workflows/{workflow}.'])
-        try:
-            page = 1
-            while True:
-                response = gh_api(f'repos/{full}/actions/workflows/{workflow}/runs?per_page=100&page={page}')
-                runs = response.get('workflow_runs', [])
-                for workflow_run in runs:
-                    if workflow_run.get('conclusion') == 'skipped':
-                        continue
-                    jobs = gh_api(f'repos/{full}/actions/runs/{workflow_run["id"]}/jobs?per_page=100')
-                    check = check_dependabot_auto_merge(workflow_run, jobs.get('jobs', []))
-                    if check is not None:
-                        return check
-                if len(runs) < 100:
+        if prs is None:
+            return result(ERROR, 'open pull request state unavailable', [
+                'The current auto-merge state cannot be verified because open pull requests could not be read.',
+            ])
+
+        action_prs = [pr for pr in prs if is_github_actions_dependabot_pr(pr)]
+        if not action_prs:
+            return {
+                **result(NA, 'no open GitHub Actions Dependabot PRs', [
+                    'There is no current GitHub Actions Dependabot pull request to assess; this is not evidence that a future auto-merge attempt will work.',
+                ]),
+                'applicable': False,
+            }
+
+        assessments = []
+        runs = None
+        for index, pr in enumerate(action_prs):
+            number = pr.get('number')
+            pr_url = pr.get('html_url') or f'https://github.com/{full}/pull/{number}'
+            if 'auto_merge' not in pr:
+                try:
+                    pr = gh_api(f'repos/{full}/pulls/{number}', token=self.pr_token)
+                    pr_url = pr.get('html_url') or pr_url
+                except (ApiError, subprocess.TimeoutExpired) as exc:
+                    assessments.append(result(ERROR, f'PR #{number} state unavailable', [str(exc)[:300]]))
+                    continue
+            if 'auto_merge' not in pr:
+                assessments.append(result(ERROR, f'PR #{number} auto-merge state unavailable', [
+                    f'GitHub did not return the auto_merge field for {pr_url}.',
+                ]))
+                continue
+            if pr['auto_merge'] is not None:
+                assessments.append(result(OK, f'auto-merge currently enabled for PR #{number}', [
+                    f'Current pull request state: {pr_url}',
+                ]))
+                continue
+
+            if runs is None:
+                try:
+                    runs = []
+                    page = 1
+                    while True:
+                        response = gh_api(
+                            f'repos/{full}/actions/workflows/{workflow}/runs?per_page=100&page={page}')
+                        page_runs = response.get('workflow_runs', [])
+                        runs.extend(page_runs)
+                        if len(page_runs) < 100:
+                            break
+                        page += 1
+                except ApiError as exc:
+                    error = actions_history_error(exc)
+                    assessments.extend(
+                        result(
+                            error['status'],
+                            f'PR #{pending.get("number")} state unverifiable: {error["summary"]}',
+                            error['details'],
+                        )
+                        for pending in action_prs[index:]
+                    )
                     break
-                page += 1
-        except ApiError as exc:
-            if re.search(r'HTTP 403|HTTP 404|Resource not accessible by integration|Actions is disabled', str(exc), re.IGNORECASE):
-                return result(NA, 'Actions run history unavailable', ['The reader App needs Actions: read to inspect private workflow runs and job steps.'])
-            raise
-        return result(NA, 'no applicable runs recorded', ['Human PRs and non-GitHub-Actions update skips do not count as successful auto-merge attempts.'])
+
+            head_ref = (pr.get('head') or {}).get('ref')
+            matching_runs = [
+                run for run in runs
+                if (
+                    any(item.get('number') == number for item in run.get('pull_requests', []))
+                    if run.get('pull_requests') else (head_ref and run.get('head_branch') == head_ref)
+                )
+            ]
+            if not matching_runs:
+                assessments.append(result(WARN, f'no workflow run found for open PR #{number}', [
+                    f'Open GitHub Actions Dependabot PR: {pr_url}',
+                    'Verify GitHub Actions is enabled, the workflow exists on the PR base branch, and Dependabot-triggered Actions are permitted.',
+                ]))
+                continue
+
+            workflow_run = max(matching_runs, key=lambda run: run.get('created_at', ''))
+            try:
+                jobs = gh_api(f'repos/{full}/actions/runs/{workflow_run["id"]}/jobs?per_page=100')
+            except ApiError as exc:
+                error = actions_history_error(exc)
+                assessments.append(result(
+                    error['status'], f'PR #{number} workflow state unverifiable: {error["summary"]}', error['details']))
+                continue
+            attempt = check_dependabot_auto_merge(workflow_run, jobs.get('jobs', []))
+            if attempt is None:
+                assessments.append(result(WARN, f'run for PR #{number} skipped the GitHub Actions update', [
+                    f'Open pull request state: {pr_url}',
+                    f'Workflow run: {workflow_run.get("html_url", "unavailable")}',
+                    'The Dependabot metadata step classified this update as non-GitHub-Actions, despite the branch naming.',
+                ]))
+            elif attempt['status'] == OK:
+                assessments.append(result(WARN, f'auto-merge step succeeded but is not enabled now for PR #{number}', [
+                    *attempt['details'],
+                    f'Current pull request state: {pr_url} (auto_merge is null).',
+                ]))
+            else:
+                assessments.append({
+                    **attempt,
+                    'details': [*attempt['details'], f'Current pull request state: {pr_url} (auto_merge is null).'],
+                })
+
+        status_priority = {FAIL: 0, ERROR: 1, WARN: 2, OK: 3}
+        overall_status = min((item['status'] for item in assessments), key=status_priority.get)
+        if len(assessments) == 1:
+            return assessments[0]
+        enabled_count = sum(item['status'] == OK for item in assessments)
+        summary = f'{enabled_count}/{len(assessments)} open GitHub Actions Dependabot PRs have auto-merge enabled'
+        details = [f'PR assessment: {item["summary"]}' for item in assessments]
+        details.extend(detail for item in assessments for detail in item['details'])
+        return result(overall_status, summary, details)
 
     def remind(self, full, prs, entry):
         notes = {}
@@ -1033,7 +1181,7 @@ def render_markdown(report):
         '',
         f'Generated {report["generated_at"]} UTC. Mode: {report["mode"]}. Repositories scanned: {len(repos)}. '
         f'Archived/disabled skipped: {len(report["skipped"])}.',
-        f'Scan branch preference: `{args.get("scan_branch", "auto")}`. `auto` prefers `develop` and falls back to the repository default.',
+        f'Requested scan branch: `{args.get("scan_branch", "develop")}`. Per-repository badges are valid only for scans of `develop`; a missing `develop` branch is not replaced with the default branch.',
         f'Excluded by report policy: {", ".join(report.get("excluded", [])) or "none"}.',
         '',
         f'Thresholds: human PRs >{args["human_pr_days"]}d, Dependabot PRs >{args["dependabot_pr_days"]}d, '
@@ -1077,7 +1225,7 @@ def render_markdown(report):
             f'<details><summary>{cell(repo["name"])} | {repo["visibility"]} | default: {cell(repo["default_branch"])} | scanned: {cell(repo.get("scan_branch", repo["default_branch"]))}</summary>'
         )
         details = [d for key, _ in COLUMNS for d in repo['checks'].get(key, {}).get('details', [])
-                   if repo['checks'][key]['status'] in (WARN, FAIL, ERROR)]
+                   if repo['checks'][key]['status'] != OK]
         details += [f'Processing error: {e}' for e in repo['errors']]
         if details:
             lines += ['', 'Findings:', '']
@@ -1101,9 +1249,11 @@ def render_markdown(report):
         '- **OSPO workflow synchronization:** compares each repository\'s default branch byte for byte with the workflow manifest '
         'and workflow files published on `National-Node-Net/ospo-resources` `main`, not `develop`. '
         'Checklists and Dependabot policy remain sourced separately from `develop`.',
-        '- **Dependabot GitHub Actions auto-merge workflow:** checks the latest applicable workflow run and job steps. '
-        'OK requires a successful auto-merge enablement step; FAIL means a failed attempt; WARN means running or unconfirmed. '
-        'Skipped human PRs and non-GitHub-Actions updates are ignored. Enabling auto-merge is not proof the PR has merged.',
+        '- **Current Dependabot GitHub Actions auto-merge state:** checks open Dependabot PRs whose head branch uses '
+        '`dependabot/github_actions/`. OK requires GitHub to report auto-merge enabled on every such open PR; FAIL reports a failed '
+        'matching workflow attempt; WARN reports an open PR with no run or with a successful historical step that is not enabled now. '
+        'No open GitHub Actions Dependabot PRs is N/A (unknown), not a pass. Actions API access failures are ERROR. '
+        'This check does not claim that a PR has merged.',
         '- **Dependabot configuration:** `.github/dependabot.yml` or `.github/dependabot.yaml` on the default branch. '
         'Conftest evaluates the existing `github.dependabot` Rego policies: GitHub Actions entries omit `target-branch`; '
         'other ecosystems in `main` + `develop` GitFlow repos target `develop`; and enabled updates have a valid groups object '
@@ -1156,7 +1306,7 @@ def render_html(report):
         f'<p>Generated {esc(report["generated_at"])} UTC. Mode: {esc(report["mode"])}. '
         f'Repositories scanned: {len(repos)}. Archived/disabled skipped: {len(report["skipped"])}. '
         f'Excluded: {esc(", ".join(report.get("excluded", [])) or "none")}.</p>',
-        f'<p>Scan branch preference: {esc(args.get("scan_branch", "auto"))}. A missing selected branch falls back to the repository default.</p>',
+        f'<p>Requested scan branch: {esc(args.get("scan_branch", "develop"))}. Per-repository badges are valid only for scans of <code>develop</code>; a missing <code>develop</code> branch is not replaced with the default branch.</p>',
         f'<p>Thresholds: human PRs &gt;{args["human_pr_days"]}d; Dependabot PRs &gt;{args["dependabot_pr_days"]}d; '
         f'dormant after {args["dormant_days"]}d; release SBOM window {args["release_days"]}d (else latest).</p>',
         '<h2>Summary</h2><table><thead><tr><th>Check</th><th>Counts</th></tr></thead><tbody>',
@@ -1194,7 +1344,7 @@ def render_html(report):
     for repo in repos:
         parts.append(f'<details><summary>{esc(repo["name"])} | {esc(repo["visibility"])} | default: {esc(repo["default_branch"])} | scanned: {esc(repo.get("scan_branch", repo["default_branch"]))}</summary><ul>')
         details = [detail for key, _ in COLUMNS for detail in repo['checks'].get(key, {}).get('details', [])
-                   if repo['checks'][key]['status'] in (WARN, FAIL, ERROR)]
+                   if repo['checks'][key]['status'] != OK]
         details.extend(f'Processing error: {error}' for error in repo['errors'])
         parts.extend(f'<li>{esc(detail)}</li>' for detail in details)
         parts.append('</ul></details>')
@@ -1222,9 +1372,10 @@ def render_html(report):
         'Repositories in <code>governance-activity-repositories.txt</code> count human OSPO commits and governance-only changes; bots remain excluded. '
         'Merge commits do not refresh activity age; original ancestor commits are evaluated instead.</li>',
         '<li><strong>Credential scan:</strong> TruffleHog scans verified credentials only; values and locations are not recorded.</li>',
-        '<li><strong>Dependabot GitHub Actions auto-merge workflow:</strong> checks the latest applicable run and job steps. '
-        'OK requires successful auto-merge enablement; FAIL means a failed attempt; WARN means running or unconfirmed. '
-        'Human PRs and non-GitHub-Actions update skips are ignored. This does not prove the PR has merged.</li>',
+        '<li><strong>Current Dependabot GitHub Actions auto-merge state:</strong> checks open Dependabot PRs with a '
+        '<code>dependabot/github_actions/</code> head branch. OK requires GitHub to report auto-merge enabled on every such PR; '
+        'FAIL means a matching workflow attempt failed; WARN means no run or a historical success not enabled now. No open PR is '
+        'N/A (unknown), not a pass; Actions API access failures are ERROR. This does not prove the PR has merged.</li>',
         '<li><strong>AI use:</strong> no AI/LLM is used.</li>',
         '</ul>',
         '<h3>OSPO workflow synchronization</h3><p>Compares each repository\'s default branch byte for byte with the workflow '
@@ -1295,8 +1446,8 @@ def parse_args(argv):
     parser.add_argument('--dependabot-pr-days', type=bounded_int, default=14)
     parser.add_argument('--dormant-days', type=bounded_int, default=180)
     parser.add_argument('--release-days', type=bounded_int, default=90)
-    parser.add_argument('--scan-branch', choices=('auto', 'main', 'develop'), default='auto',
-                        help='Branch to scan; auto prefers develop and falls back to the repository default.')
+    parser.add_argument('--scan-branch', choices=('auto', 'main', 'develop'), default='develop',
+                        help='Branch to scan; published repository badges require develop.')
     parser.add_argument('--post-reminders', action='store_true',
                         help='Comment on stale non-draft human PRs. Requires --reminder-author.')
     parser.add_argument('--reminder-author', help='Login that posts reminders, e.g. my-app[bot].')

@@ -14,10 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       scan_branch:
-        description: Branch to scan (repos without it use their default branch)
+        description: Repository governance badges are based on develop for now
         type: choice
         options:
-          - main
           - develop
         default: develop
         required: true
@@ -128,7 +127,7 @@ jobs:
           RELEASE_DAYS: ${{ github.event.inputs.release_days || '90' }}
           EXCLUDED_REPOS: ${{ github.event.inputs.excluded_repos || vars.GOVERNANCE_EXCLUDED_REPOS || '' }}
           STATUS_ICON_REF: ${{ github.ref_name }}
-          SCAN_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_branch || 'auto' }}
+          SCAN_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_branch || 'develop' }}
         run: |
           set -euo pipefail
           args=(

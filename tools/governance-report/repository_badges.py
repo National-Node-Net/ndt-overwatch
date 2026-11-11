@@ -20,8 +20,9 @@ RED = '#cf222e'
 GRAY = '#6e7781'
 GRACE = timedelta(hours=6)
 BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
-PROFILE_PASS_NA = {'develop', 'sbom', 'auto_backmerge', 'dependabot_auto_merge'}
-PROFILE_FAIL_NA = {'dependabot_config', 'delete_branch', 'secret_scan'}
+PROFILE_PASS_NA = {'develop', 'sbom'}
+PROFILE_FAIL_NA = {'secret_scan'}
+COMPLIANCE_CHECKS = tuple(key for key, _title in COLUMNS if key != 'activity')
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+\Z')
 
 
@@ -119,7 +120,7 @@ def _profile_check_status(key, check):
 def _profile_status(repository):
     statuses = [
         _profile_check_status(key, repository['checks'].get(key))
-        for key, _title in COLUMNS
+        for key in COMPLIANCE_CHECKS
     ]
     if FAIL in statuses:
         return 'fail', RED
@@ -130,21 +131,19 @@ def _profile_status(repository):
     return 'pass', GREEN
 
 
-def _activity(repository, completed_at, threshold):
+def _activity(repository, completed_at):
     if completed_at is None:
-        return 'unknown', GRAY
+        return 'unknown'
     activity = repository.get('activity')
     if not isinstance(activity, dict) or activity.get('branch') != 'develop':
-        return 'unknown', GRAY
+        return 'unknown'
     committed_at = _timestamp(activity.get('last_application_commit_at'))
     if committed_at is None or committed_at > completed_at:
-        return 'unknown', GRAY
+        return 'unknown'
     age = (completed_at - committed_at).days
     if age < 0:
-        return 'unknown', GRAY
-    if age <= threshold:
-        return f'{age} days', GREEN
-    return f'{age} days', AMBER
+        return 'unknown'
+    return f'{age} days'
 
 
 def _last_checked(completed_at, now):
@@ -168,7 +167,7 @@ def _last_checked(completed_at, now):
 
 def generate_badges(report, now=None):
     """Return three status-only SVG strings for every repository in the report."""
-    threshold = _validate_report(report)
+    _validate_report(report)
     current_time = _validate_now(now if now is not None else datetime.now(timezone.utc))
     completed_at = _timestamp(report.get('completed_at'))
     if completed_at is not None and completed_at > current_time:
@@ -176,12 +175,17 @@ def generate_badges(report, now=None):
 
     badges = {}
     for repository in report['repositories']:
-        profile_status, profile_color = _profile_status(repository)
-        activity, activity_color = _activity(repository, completed_at, threshold)
-        checked, checked_color = _last_checked(completed_at, current_time)
+        develop_scanned = repository.get('scan_branch') == 'develop'
+        if develop_scanned:
+            profile_status, profile_color = _profile_status(repository)
+            activity = _activity(repository, completed_at)
+            checked, checked_color = _last_checked(completed_at, current_time)
+        else:
+            profile_status, profile_color = 'unknown', GRAY
+            activity, checked, checked_color = 'not checked', 'not checked', GRAY
         badges[repository['name']] = {
             BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', profile_status, profile_color),
-            BADGE_FILENAMES[1]: _badge_svg('Develop activity', activity, activity_color),
+            BADGE_FILENAMES[1]: _badge_svg('Days since last commit to Develop', activity, GRAY),
             BADGE_FILENAMES[2]: _badge_svg('Last checked', checked, checked_color),
         }
     return badges

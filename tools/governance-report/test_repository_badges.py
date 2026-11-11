@@ -27,6 +27,7 @@ def make_repository(name='public-repo', visibility='public'):
     return {
         'name': name,
         'visibility': visibility,
+        'scan_branch': 'develop',
         'errors': [],
         'checks': {key: {'status': gr.OK} for key, _title in gr.COLUMNS},
         'activity': {
@@ -105,18 +106,27 @@ class ComplianceBadgeTests(unittest.TestCase):
         self.assertEqual(badge_value(badge), 'unknown')
         self.assertNotIn('private processing detail', badge)
 
+    def test_activity_status_does_not_affect_compliance_badge(self):
+        for status in (gr.WARN, gr.FAIL, gr.ERROR, gr.NA):
+            with self.subTest(activity_status=status):
+                repository = make_repository()
+                repository['checks']['activity'] = {'status': status}
+                badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['ospo-compliance.svg']
+                self.assertEqual(badge_value(badge), 'pass')
+                self.assertEqual(badge_color(badge), rb.GREEN)
+
 
 class ProfileStatusTests(unittest.TestCase):
     def test_profile_status_maps_expected_not_applicable_checks(self):
         cases = (
             ('develop', {'status': gr.NA}, 'pass', rb.GREEN),
             ('sbom', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
-            ('auto_backmerge', {'status': gr.NA}, 'pass', rb.GREEN),
-            ('dependabot_auto_merge', {'status': gr.NA}, 'pass', rb.GREEN),
+            ('auto_backmerge', {'status': gr.NA}, 'unknown', rb.GRAY),
+            ('dependabot_auto_merge', {'status': gr.NA}, 'unknown', rb.GRAY),
             ('secret_scan', {'status': gr.NA}, 'fail', rb.RED),
             ('secret_scan', {'status': gr.ERROR}, 'fail', rb.RED),
-            ('dependabot_config', {'status': gr.NA}, 'fail', rb.RED),
-            ('delete_branch', {'status': gr.NA}, 'fail', rb.RED),
+            ('dependabot_config', {'status': gr.NA}, 'unknown', rb.GRAY),
+            ('delete_branch', {'status': gr.NA}, 'unknown', rb.GRAY),
             ('files', {'status': gr.NA}, 'unknown', rb.GRAY),
             ('sbom', {'status': gr.NA, 'applicable': True}, 'unknown', rb.GRAY),
         )
@@ -139,16 +149,17 @@ class ProfileStatusTests(unittest.TestCase):
 
 
 class ActivityBadgeTests(unittest.TestCase):
-    def test_activity_threshold_is_inclusive_and_age_uses_whole_days(self):
+    def test_activity_badge_shows_whole_days_in_gray_regardless_of_age(self):
         repository = make_repository()
         repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=180, hours=23))
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
         self.assertEqual(badge_value(badge), '180 days')
-        self.assertEqual(badge_color(badge), rb.GREEN)
+        self.assertEqual(badge_color(badge), rb.GRAY)
+        self.assertIn('Days since last commit to Develop', badge_root(badge).attrib['aria-label'])
         repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=181))
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
         self.assertEqual(badge_value(badge), '181 days')
-        self.assertEqual(badge_color(badge), rb.AMBER)
+        self.assertEqual(badge_color(badge), rb.GRAY)
 
     def test_missing_bad_future_or_non_develop_activity_is_unknown(self):
         for field, value, branch in (
@@ -163,6 +174,16 @@ class ActivityBadgeTests(unittest.TestCase):
                 badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
                 self.assertEqual(badge_value(badge), 'unknown')
                 self.assertEqual(badge_color(badge), rb.GRAY)
+
+    def test_non_develop_scan_does_not_publish_compliance_or_freshness_as_verified(self):
+        repository = make_repository()
+        repository['scan_branch'] = 'main'
+        badges = rb.generate_badges(make_report([repository]), NOW)[repository['name']]
+        self.assertEqual(badge_value(badges['ospo-compliance.svg']), 'unknown')
+        self.assertEqual(badge_color(badges['ospo-compliance.svg']), rb.GRAY)
+        self.assertEqual(badge_value(badges['develop-activity.svg']), 'not checked')
+        self.assertEqual(badge_value(badges['last-checked.svg']), 'not checked')
+        self.assertEqual(badge_color(badges['last-checked.svg']), rb.GRAY)
 
 
 class FreshnessBadgeTests(unittest.TestCase):

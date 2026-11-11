@@ -25,6 +25,16 @@ def pr(number, login, days_ago, user_type='User', draft=False, base='develop', h
     }
 
 
+def actions_dependabot_pr(number=7, auto_merge=None):
+    return {
+        'number': number,
+        'html_url': f'https://github.com/Org/repo/pull/{number}',
+        'user': {'login': gr.DEPENDABOT, 'type': 'Bot'},
+        'head': {'ref': f'dependabot/github_actions/checkout-{number}'},
+        'auto_merge': auto_merge,
+    }
+
+
 def commit(days_ago, name='Alice', login='alice', message='', body=''):
     return {
         'committedDate': iso(days_ago), 'messageHeadline': message, 'messageBody': body,
@@ -208,7 +218,10 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(gr.Scanner.activity_source(activity, 'main', 'main'), ('main', main))
         self.assertEqual(gr.Scanner.activity_source(activity, 'main', 'develop'), ('develop', develop))
         self.assertEqual(gr.Scanner.activity_source({'develop': None, 'main': None, 'defaultBranchRef': default},
-                                                    'default', 'develop'), ('default', default))
+                                                    'default', 'auto'), ('default', default))
+        with self.assertRaisesRegex(gr.ApiError, 'refusing to fall back'):
+            gr.Scanner.activity_source({'develop': None, 'main': None, 'defaultBranchRef': default},
+                                       'default', 'develop')
 
     def test_governance_only_paths_and_mixed_changes(self):
         rules = self.scanner().governance_paths
@@ -411,8 +424,8 @@ class ActivityTests(unittest.TestCase):
         check = gr.check_activity(activity, NOW, 180)
         self.assertIn('5 days since last commit on main', check['summary'])
 
-    def test_parse_args_scan_branch_defaults_to_auto_and_accepts_dropdown_choices(self):
-        self.assertEqual(gr.parse_args(['--org', 'org']).scan_branch, 'auto')
+    def test_parse_args_scan_branch_defaults_to_develop_and_accepts_choices(self):
+        self.assertEqual(gr.parse_args(['--org', 'org']).scan_branch, 'develop')
         for branch in ('main', 'develop'):
             self.assertEqual(gr.parse_args(['--org', 'org', '--scan-branch', branch]).scan_branch, branch)
         with patch('sys.stderr'), self.assertRaises(SystemExit):
@@ -655,35 +668,139 @@ class OtherCheckTests(unittest.TestCase):
         non_actions = [{'steps': [{'name': 'Skip non-GitHub Actions updates', 'conclusion': 'success'}]}]
         self.assertIsNone(gr.check_dependabot_auto_merge(run, non_actions))
 
-    def test_dependabot_auto_merge_missing_and_inaccessible(self):
+    def test_dependabot_auto_merge_missing_and_currently_enabled(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
-        self.assertEqual(scanner.dependabot_auto_merge('Org/repo', set())['status'], gr.FAIL)
+        self.assertEqual(scanner.dependabot_auto_merge('Org/repo', set(), [])['status'], gr.FAIL)
         paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('HTTP 403')):
-            self.assertEqual(scanner.dependabot_auto_merge('Org/repo', paths)['status'], gr.NA)
+        enabled_pr = actions_dependabot_pr(auto_merge={'enabled_by': {'login': 'bot'}, 'merge_method': 'merge'})
+        with patch.object(gr, 'gh_api') as api:
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [enabled_pr])
+        self.assertEqual(check['status'], gr.OK)
+        self.assertIn('currently enabled', check['summary'])
+        api.assert_not_called()
 
-    def test_dependabot_auto_merge_ignores_skipped_runs(self):
+    def test_dependabot_auto_merge_no_open_action_pr_is_unknown_not_pass(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        with patch.object(gr, 'gh_api') as api:
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [])
+        self.assertEqual(check['status'], gr.NA)
+        self.assertIs(check['applicable'], False)
+        self.assertIn('not evidence', check['details'][0])
+        api.assert_not_called()
+
+    def test_dependabot_auto_merge_open_action_pr_without_run_warns(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        with patch.object(gr, 'gh_api', return_value={'workflow_runs': []}):
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
+        self.assertEqual(check['status'], gr.WARN)
+        self.assertIn('no workflow run found for open PR #7', check['summary'])
+        self.assertIn('Dependabot-triggered Actions', str(check['details']))
+
+    def test_dependabot_auto_merge_current_state_overrides_old_success(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        scanner.pr_token = None
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        workflow_run = {
+            'id': 12, 'run_number': 4, 'head_branch': 'dependabot/github_actions/checkout-7',
+            'pull_requests': [{'number': 7}], 'html_url': 'https://example.invalid/run/12',
+            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success',
+        }
+        responses = [
+            {'workflow_runs': [workflow_run]},
+            {'jobs': [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'success'}]}]},
+        ]
+        with patch.object(gr, 'gh_api', side_effect=responses):
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
+        self.assertEqual(check['status'], gr.WARN)
+        self.assertIn('not enabled now', check['summary'])
+        self.assertIn('auto_merge is null', str(check['details']))
+
+    def test_dependabot_auto_merge_reports_actions_permission_error(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('HTTP 403: Resource not accessible by integration')):
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
+        self.assertEqual(check['status'], gr.ERROR)
+        self.assertIn('HTTP 403', check['summary'])
+        self.assertIn('Actions: read', check['details'][0])
+
+    def test_dependabot_auto_merge_preserves_failed_step(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        workflow_run = {
+            'id': 12, 'run_number': 4, 'head_branch': 'dependabot/github_actions/checkout-7',
+            'pull_requests': [{'number': 7}], 'html_url': 'https://example.invalid/run/12',
+            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'failure',
+        }
+        responses = [
+            {'workflow_runs': [workflow_run]},
+            {'jobs': [{'steps': [{'name': 'Fetch GitHub App token for target repo', 'conclusion': 'failure'}]}]},
+        ]
+        with patch.object(gr, 'gh_api', side_effect=responses):
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
+        self.assertEqual(check['status'], gr.FAIL)
+        self.assertIn('Fetch GitHub App token', str(check['details']))
+
+    def test_dependabot_auto_merge_does_not_match_run_linked_to_another_pr_by_branch(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
+        other_pr_run = {
+            'id': 12, 'head_branch': 'dependabot/github_actions/checkout-7',
+            'pull_requests': [{'number': 8}], 'html_url': 'https://example.invalid/run/12',
+            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success',
+        }
+        with patch.object(gr, 'gh_api', return_value={'workflow_runs': [other_pr_run]}):
+            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr(number=7)])
+        self.assertEqual(check['status'], gr.WARN)
+        self.assertIn('no workflow run found for open PR #7', check['summary'])
+
+    def test_dependabot_auto_merge_keeps_failure_when_later_pr_history_is_inaccessible(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
         paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
         runs = [
-            {'id': 3, 'conclusion': 'skipped'},
-            {'id': 2, 'conclusion': 'success', 'status': 'completed', 'html_url': 'https://example.invalid/run/2'},
-            {'id': 1, 'conclusion': 'success', 'status': 'completed', 'html_url': 'https://example.invalid/run/1'},
+            {'id': 12, 'head_branch': 'dependabot/github_actions/checkout-7', 'pull_requests': [{'number': 7}],
+             'html_url': 'https://example.invalid/run/12', 'created_at': '2026-10-22T00:00:00Z',
+             'status': 'completed', 'conclusion': 'failure'},
+            {'id': 13, 'head_branch': 'dependabot/github_actions/setup-node-8', 'pull_requests': [{'number': 8}],
+             'html_url': 'https://example.invalid/run/13', 'created_at': '2026-10-23T00:00:00Z',
+             'status': 'completed', 'conclusion': 'failure'},
         ]
         responses = [
             {'workflow_runs': runs},
-            {'jobs': [{'steps': [{'name': 'Skip non-GitHub Actions updates', 'conclusion': 'success'}]}]},
-            {'jobs': [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'success'}]}]},
+            {'jobs': [{'steps': [{'name': 'Fetch GitHub App token for target repo', 'conclusion': 'failure'}]}]},
+            gr.ApiError('HTTP 403: Resource not accessible by integration'),
         ]
-        with patch.object(gr, 'gh_api', side_effect=responses) as api:
-            self.assertEqual(scanner.dependabot_auto_merge('Org/repo', paths)['status'], gr.OK)
-        self.assertEqual(api.call_count, 3)
+        with patch.object(gr, 'gh_api', side_effect=responses):
+            check = scanner.dependabot_auto_merge(
+                'Org/repo', paths, [actions_dependabot_pr(7), actions_dependabot_pr(8)])
+        self.assertEqual(check['status'], gr.FAIL)
+        self.assertIn('Fetch GitHub App token', str(check['details']))
+        self.assertIn('Actions history access denied', str(check['details']))
 
-    def test_dependabot_auto_merge_no_applicable_runs(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        with patch.object(gr, 'gh_api', return_value={'workflow_runs': [{'conclusion': 'skipped'}]}):
-            self.assertEqual(scanner.dependabot_auto_merge('Org/repo', paths)['status'], gr.NA)
+    def test_actions_history_error_classifies_disabled_and_hidden_404(self):
+        disabled = gr.actions_history_error(gr.ApiError('Actions is disabled'))
+        self.assertEqual(disabled['status'], gr.FAIL)
+        self.assertIn('disabled', disabled['summary'])
+        inaccessible = gr.actions_history_error(gr.ApiError('HTTP 404: Resource not found'))
+        self.assertEqual(inaccessible['status'], gr.ERROR)
+        self.assertIn('conceal inaccessible private resources', inaccessible['details'][0])
+
+    def test_default_branch_workflow_tree_is_used_when_scan_branch_differs(self):
+        state = {'scan_branch': 'develop', 'blobs': {'only-develop.yml': 'sha-develop'}}
+        default_tree = {'tree': [
+            {'path': '.github/workflows/auto-merge-dependabot-pull-requests.yml', 'sha': 'sha-main', 'type': 'blob'},
+        ]}
+        with patch.object(gr, 'gh_api', return_value=default_tree) as api:
+            blobs = gr.Scanner._default_branch_blobs('Org/repo', 'main', state)
+        self.assertEqual(blobs, {'.github/workflows/auto-merge-dependabot-pull-requests.yml': 'sha-main'})
+        api.assert_called_once_with('repos/Org/repo/git/trees/main?recursive=1')
+
+    def test_truncated_scan_tree_is_not_used_to_claim_default_workflow_missing(self):
+        state = {'scan_branch': 'main', 'blobs': {}, 'blobs_truncated': True}
+        with self.assertRaisesRegex(gr.ApiError, 'default-branch tree listing truncated'):
+            gr.Scanner._default_branch_blobs('Org/repo', 'main', state)
 
     def test_github_dot_repo_is_excluded(self):
         repos = [
@@ -845,7 +962,11 @@ class OtherCheckTests(unittest.TestCase):
             'parameters': {'human_pr_days': 30, 'dependabot_pr_days': 14, 'dormant_days': 180, 'release_days': 90},
             'repositories': [{
                 'name': 'r', 'url': 'https://example.invalid/r', 'visibility': 'public', 'default_branch': 'main',
-                'errors': [], 'checks': {'files': gr.result(gr.FAIL, 'a|b', ['Missing file: a|b'])},
+                'errors': [], 'checks': {
+                    'files': gr.result(gr.FAIL, 'a|b', ['Missing file: a|b']),
+                    'dependabot_auto_merge': gr.result(
+                        gr.NA, 'no open GitHub Actions Dependabot PRs', ['No current PR is available to assess.']),
+                },
             }],
         }
         markdown = gr.render_markdown(report)
@@ -855,6 +976,7 @@ class OtherCheckTests(unittest.TestCase):
         self.assertIn('### Private and internal repositories (0)', markdown)
         self.assertIn('Each cell shows the full status and a short result.', markdown)
         self.assertIn('Missing file: a\\|b', markdown)
+        self.assertIn('No current PR is available to assess.', markdown)
         self.assertIn('Human PR age', markdown)
         self.assertIn('no separate FAIL age threshold is currently configured', markdown)
         self.assertIn('published on `National-Node-Net/ospo-resources` `main`, not `develop`', markdown)
@@ -865,10 +987,11 @@ class OtherCheckTests(unittest.TestCase):
         dashboard_html = gr.render_html(report)
         self.assertIn('.warn{color:#9a6700}', dashboard_html)
         self.assertIn('<span class="status fail">FAIL</span>', dashboard_html)
+        self.assertIn('No current PR is available to assess.', dashboard_html)
         self.assertIn('.result-summary{font-size:.75em', dashboard_html)
         self.assertNotIn('font-family', dashboard_html)
         self.assertNotIn('The font is inherited from the viewer', dashboard_html)
-        self.assertIn('Dependabot GitHub Actions<br>auto-merge workflow', dashboard_html)
+        self.assertIn('Current Dependabot Actions<br>auto-merge state', dashboard_html)
         self.assertNotIn('Repository auto-merge enabled', dashboard_html)
         self.assertIn('published on <code>National-Node-Net/ospo-resources</code> <code>main</code>', dashboard_html)
         legend = dashboard_html.split('<h3>Templates and policy</h3>', 1)[1].split('</ul>', 1)[0]
