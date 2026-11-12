@@ -1,0 +1,4 @@
+# Human OSPO commits and governance-only file changes count as activity here.
+ospo-resources
+ndt-overwatch
+private-ospo-resources
