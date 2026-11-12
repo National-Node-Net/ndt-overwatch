@@ -122,7 +122,9 @@ class ProfileStatusTests(unittest.TestCase):
             ('develop', {'status': gr.NA}, 'pass', rb.GREEN),
             ('sbom', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
             ('auto_backmerge', {'status': gr.NA}, 'unknown', rb.GRAY),
+            ('auto_backmerge', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
             ('dependabot_auto_merge', {'status': gr.NA}, 'unknown', rb.GRAY),
+            ('dependabot_auto_merge', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
             ('secret_scan', {'status': gr.NA}, 'fail', rb.RED),
             ('secret_scan', {'status': gr.ERROR}, 'fail', rb.RED),
             ('dependabot_config', {'status': gr.NA}, 'unknown', rb.GRAY),
@@ -155,7 +157,7 @@ class ActivityBadgeTests(unittest.TestCase):
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
         self.assertEqual(badge_value(badge), '180 days')
         self.assertEqual(badge_color(badge), rb.GRAY)
-        self.assertIn('Days since last commit to Develop', badge_root(badge).attrib['aria-label'])
+        self.assertIn('Days since last commit to develop branch', badge_root(badge).attrib['aria-label'])
         repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=181))
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
         self.assertEqual(badge_value(badge), '181 days')

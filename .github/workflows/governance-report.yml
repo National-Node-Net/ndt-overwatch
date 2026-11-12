@@ -92,11 +92,11 @@ jobs:
           token: ${{ steps.reader_token.outputs.token }}
           path: ospo-resources
 
-      - name: Checkout published OSPO workflow baseline
+      - name: Checkout develop OSPO workflow baseline
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: National-Node-Net/ospo-resources
-          ref: main
+          ref: develop
           token: ${{ steps.reader_token.outputs.token }}
           path: ospo-workflows
 

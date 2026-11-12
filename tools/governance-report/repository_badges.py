@@ -20,7 +20,7 @@ RED = '#cf222e'
 GRAY = '#6e7781'
 GRACE = timedelta(hours=6)
 BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
-PROFILE_PASS_NA = {'develop', 'sbom'}
+PROFILE_PASS_NA = {'develop', 'sbom', 'dependabot_auto_merge', 'auto_backmerge'}
 PROFILE_FAIL_NA = {'secret_scan'}
 COMPLIANCE_CHECKS = tuple(key for key, _title in COLUMNS if key != 'activity')
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+\Z')
@@ -105,7 +105,11 @@ def _profile_check_status(key, check):
     if not isinstance(applicable, bool):
         return 'unknown'
     if status == NA:
-        if key in PROFILE_PASS_NA and (key != 'sbom' or applicable is False):
+        if key in PROFILE_PASS_NA:
+            if key == 'sbom' and applicable is not False:
+                return 'unknown'
+            if key in ('dependabot_auto_merge', 'auto_backmerge') and applicable is not False:
+                return 'unknown'
             return OK
         if key in PROFILE_FAIL_NA:
             return FAIL
@@ -185,7 +189,7 @@ def generate_badges(report, now=None):
             activity, checked, checked_color = 'not checked', 'not checked', GRAY
         badges[repository['name']] = {
             BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', profile_status, profile_color),
-            BADGE_FILENAMES[1]: _badge_svg('Days since last commit to Develop', activity, GRAY),
+            BADGE_FILENAMES[1]: _badge_svg('Days since last commit to develop branch', activity, GRAY),
             BADGE_FILENAMES[2]: _badge_svg('Last checked', checked, checked_color),
         }
     return badges

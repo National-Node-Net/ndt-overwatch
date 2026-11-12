@@ -1,7 +1,7 @@
 # README
 
 [![OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/ospo-compliance.svg)](tools/governance-report/README.md)
-[![Days since last commit to Develop](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/develop-activity.svg)](tools/governance-report/README.md)
+[![Days since last commit to develop branch](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/develop-activity.svg)](tools/governance-report/README.md)
 [![Last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/last-checked.svg)](tools/governance-report/README.md)
 
 The central weekly scan publishes status-only badges for every included repository, public and private, to the
@@ -10,13 +10,9 @@ completed scan is within the freshness window. Full reports remain separate work
 
 ## Public repository governance
 
-The table below moves the public-repository overview from the organisation profile to this central report repository. The per-repository badges are currently based only on scans of each repository's `develop` branch; a repository without `develop` is shown as unknown/not checked rather than silently scanned on `main`. We may move this baseline to `main` later.
+The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks.
 
-The **Days since last commit to Develop** badge is intentionally gray for every value and shows elapsed whole days; it does not use red/amber/green status colors. The **Last checked** badge still indicates report freshness.
-
-The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks. It does **not** include days since the last Develop commit or scan freshness.
-
-| Repository | OSPO compliance | Days since last commit to Develop | Last checked |
+| Repository | OSPO compliance | Days since last commit to develop branch | Last checked |
 | --- | --- | --- | --- |
 | [archetypes](https://github.com/National-Node-Net/archetypes) | ![archetypes OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/archetypes/ospo-compliance.svg) | ![archetypes days since last commit to Develop](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/archetypes/develop-activity.svg) | ![archetypes last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/archetypes/last-checked.svg) |
 | [data-extractor](https://github.com/National-Node-Net/data-extractor) | ![data-extractor OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/data-extractor/ospo-compliance.svg) | ![data-extractor days since last commit to Develop](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/data-extractor/develop-activity.svg) | ![data-extractor last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/data-extractor/last-checked.svg) |

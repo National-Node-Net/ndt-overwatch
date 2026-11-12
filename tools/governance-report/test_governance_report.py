@@ -25,16 +25,6 @@ def pr(number, login, days_ago, user_type='User', draft=False, base='develop', h
     }
 
 
-def actions_dependabot_pr(number=7, auto_merge=None):
-    return {
-        'number': number,
-        'html_url': f'https://github.com/Org/repo/pull/{number}',
-        'user': {'login': gr.DEPENDABOT, 'type': 'Bot'},
-        'head': {'ref': f'dependabot/github_actions/checkout-{number}'},
-        'auto_merge': auto_merge,
-    }
-
-
 def commit(days_ago, name='Alice', login='alice', message='', body=''):
     return {
         'committedDate': iso(days_ago), 'messageHeadline': message, 'messageBody': body,
@@ -144,6 +134,18 @@ class DependabotPrTests(unittest.TestCase):
         check = gr.check_dependabot_prs(prs, NOW, 14)
         self.assertEqual(check['status'], gr.FAIL)
         self.assertEqual(check['summary'], '2 open, 2 >14d, 1 >90d')
+
+    def test_develop_pr_selection_excludes_main_targeting_prs(self):
+        prs = [
+            pr(1, gr.DEPENDABOT, 100, 'Bot', base='develop'),
+            pr(2, gr.DEPENDABOT, 100, 'Bot', base='main'),
+            pr(3, 'alice', 100, base='main'),
+        ]
+        develop_prs = gr.pull_requests_targeting_branch(prs, 'develop')
+        check = gr.check_dependabot_prs(develop_prs, NOW, 14)
+        self.assertEqual([item['number'] for item in develop_prs], [1])
+        self.assertEqual(check['status'], gr.FAIL)
+        self.assertEqual(check['summary'], '1 open, 1 >14d, 1 >90d')
 
 
 class HumanPrTests(unittest.TestCase):
@@ -451,7 +453,7 @@ class WorkflowSourceTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.source_root = Path(directory.name) / 'develop'
-        self.workflow_root = Path(directory.name) / 'main'
+        self.workflow_root = Path(directory.name) / 'workflow-develop'
         for root in (self.source_root, self.workflow_root):
             (root / '.github/workflows').mkdir(parents=True)
         self.workflow_path = '.github/workflows/published.yml'
@@ -462,24 +464,24 @@ class WorkflowSourceTests(unittest.TestCase):
         (self.source_root / self.workflow_path).write_bytes(b'develop workflow\n')
         (self.source_root / '.github/workflows/stale-pr-alerts.yml').write_bytes(b'develop only\n')
         (self.workflow_root / 'organisation-required-workflows.txt').write_text(self.workflow_path + '\n')
-        (self.workflow_root / self.workflow_path).write_bytes(b'published main workflow\n')
+        (self.workflow_root / self.workflow_path).write_bytes(b'published develop workflow\n')
         self.args = gr.parse_args(['--org', 'Org', '--source-root', str(self.source_root),
                                    '--workflow-source-root', str(self.workflow_root)])
 
-    def test_main_manifest_and_hashes_are_independent_of_develop_policy(self):
+    def test_develop_manifest_and_hashes_are_independent_of_policy_checkout(self):
         scanner = gr.Scanner(self.args, self.source_root, self.workflow_root)
         self.assertEqual(scanner.expected_workflows, {
-            'published.yml': gr.git_blob_sha(b'published main workflow\n'),
+            'published.yml': gr.git_blob_sha(b'published develop workflow\n'),
         })
         self.assertNotIn('stale-pr-alerts.yml', scanner.expected_workflows)
         self.assertEqual(scanner.policy_dir, self.source_root / 'tools/policy-as-code/policy')
         self.assertEqual(scanner.oss_files, ['README.md', 'LICENSE.md'])
-        main_blobs = {self.workflow_path: gr.git_blob_sha(b'published main workflow\n')}
-        self.assertEqual(gr.check_workflows(main_blobs, scanner.expected_workflows)['status'], gr.OK)
-        develop_blobs = {self.workflow_path: gr.git_blob_sha(b'develop workflow\n')}
-        self.assertEqual(gr.check_workflows(develop_blobs, scanner.expected_workflows)['status'], gr.WARN)
+        develop_blobs = {self.workflow_path: gr.git_blob_sha(b'published develop workflow\n')}
+        self.assertEqual(gr.check_workflows(develop_blobs, scanner.expected_workflows)['status'], gr.OK)
+        old_main_blobs = {self.workflow_path: gr.git_blob_sha(b'old main workflow\n')}
+        self.assertEqual(gr.check_workflows(old_main_blobs, scanner.expected_workflows)['status'], gr.WARN)
 
-    def test_default_workflow_root_does_not_follow_policy_source_root(self):
+    def test_default_develop_workflow_root_does_not_follow_policy_source_root(self):
         args = gr.parse_args(['--org', 'Org', '--source-root', str(self.source_root)])
         self.assertEqual(args.workflow_source_root, Path(gr.__file__).resolve().parents[2] / 'ospo-workflows')
         self.assertNotEqual(args.workflow_source_root, args.source_root)
@@ -654,153 +656,75 @@ class OtherCheckTests(unittest.TestCase):
         self.assertEqual(gr.check_delete_branch(True)['status'], gr.OK)
 
     def test_dependabot_auto_merge_outcomes(self):
-        run = {'id': 12, 'run_number': 4, 'html_url': 'https://example.invalid/run/12',
-               'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success'}
-        enabled = [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'success'}]}]
-        self.assertEqual(gr.check_dependabot_auto_merge(run, enabled)['status'], gr.OK)
-        disabled = [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'skipped'}]}]
-        self.assertEqual(gr.check_dependabot_auto_merge(run, disabled)['status'], gr.WARN)
-        failed = [{ 'steps': [{'name': 'Fetch GitHub App token for target repo', 'conclusion': 'failure'}]}]
-        check = gr.check_dependabot_auto_merge({**run, 'conclusion': 'failure'}, failed)
-        self.assertEqual(check['status'], gr.FAIL)
-        self.assertIn('Fetch GitHub App token', str(check['details']))
-        self.assertEqual(gr.check_dependabot_auto_merge({**run, 'status': 'in_progress', 'conclusion': None}, [])['status'], gr.WARN)
-        non_actions = [{'steps': [{'name': 'Skip non-GitHub Actions updates', 'conclusion': 'success'}]}]
-        self.assertIsNone(gr.check_dependabot_auto_merge(run, non_actions))
+        successful = {'id': 12, 'run_number': 4, 'html_url': 'https://example.invalid/run/12',
+                      'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success'}
+        skipped = {**successful, 'conclusion': 'skipped'}
+        failed = {**successful, 'conclusion': 'failure'}
+        self.assertEqual(gr.check_dependabot_auto_merge(successful)['status'], gr.OK)
+        self.assertEqual(gr.check_dependabot_auto_merge(skipped)['status'], gr.OK)
+        self.assertEqual(gr.check_dependabot_auto_merge(failed)['status'], gr.FAIL)
+        self.assertEqual(gr.check_dependabot_auto_merge(
+            {**successful, 'status': 'in_progress', 'conclusion': None})['status'], gr.WARN)
 
-    def test_dependabot_auto_merge_missing_and_currently_enabled(self):
+    def test_dependabot_auto_merge_no_runs_pass(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
-        self.assertEqual(scanner.dependabot_auto_merge('Org/repo', set(), [])['status'], gr.FAIL)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        enabled_pr = actions_dependabot_pr(auto_merge={'enabled_by': {'login': 'bot'}, 'merge_method': 'merge'})
-        with patch.object(gr, 'gh_api') as api:
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [enabled_pr])
+        with patch.object(gr, 'gh_api', return_value={'workflow_runs': []}) as api:
+            check = scanner.dependabot_auto_merge('Org/repo')
         self.assertEqual(check['status'], gr.OK)
-        self.assertIn('currently enabled', check['summary'])
-        api.assert_not_called()
+        self.assertIn('no workflow runs recorded', check['summary'])
+        api.assert_called_once_with(
+            'repos/Org/repo/actions/workflows/auto-merge-dependabot-pull-requests.yml/runs?per_page=100&page=1')
 
-    def test_dependabot_auto_merge_no_open_action_pr_is_unknown_not_pass(self):
+    def test_dependabot_auto_merge_uses_latest_run_only_and_never_checks_settings(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        with patch.object(gr, 'gh_api') as api:
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [])
-        self.assertEqual(check['status'], gr.NA)
-        self.assertIs(check['applicable'], False)
-        self.assertIn('not evidence', check['details'][0])
-        api.assert_not_called()
-
-    def test_dependabot_auto_merge_open_action_pr_without_run_warns(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        with patch.object(gr, 'gh_api', return_value={'workflow_runs': []}):
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
-        self.assertEqual(check['status'], gr.WARN)
-        self.assertIn('no workflow run found for open PR #7', check['summary'])
-        self.assertIn('Dependabot-triggered Actions', str(check['details']))
-
-    def test_dependabot_auto_merge_current_state_overrides_old_success(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        scanner.pr_token = None
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        workflow_run = {
-            'id': 12, 'run_number': 4, 'head_branch': 'dependabot/github_actions/checkout-7',
-            'pull_requests': [{'number': 7}], 'html_url': 'https://example.invalid/run/12',
-            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success',
-        }
-        responses = [
-            {'workflow_runs': [workflow_run]},
-            {'jobs': [{'steps': [{'name': 'Enable auto-merge for the pull request', 'conclusion': 'success'}]}]},
-        ]
-        with patch.object(gr, 'gh_api', side_effect=responses):
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
-        self.assertEqual(check['status'], gr.WARN)
-        self.assertIn('not enabled now', check['summary'])
-        self.assertIn('auto_merge is null', str(check['details']))
-
-    def test_dependabot_auto_merge_reports_actions_permission_error(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('HTTP 403: Resource not accessible by integration')):
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
-        self.assertEqual(check['status'], gr.ERROR)
-        self.assertIn('HTTP 403', check['summary'])
-        self.assertIn('Actions: read', check['details'][0])
-
-    def test_dependabot_auto_merge_preserves_failed_step(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        workflow_run = {
-            'id': 12, 'run_number': 4, 'head_branch': 'dependabot/github_actions/checkout-7',
-            'pull_requests': [{'number': 7}], 'html_url': 'https://example.invalid/run/12',
-            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'failure',
-        }
-        responses = [
-            {'workflow_runs': [workflow_run]},
-            {'jobs': [{'steps': [{'name': 'Fetch GitHub App token for target repo', 'conclusion': 'failure'}]}]},
-        ]
-        with patch.object(gr, 'gh_api', side_effect=responses):
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr()])
-        self.assertEqual(check['status'], gr.FAIL)
-        self.assertIn('Fetch GitHub App token', str(check['details']))
-
-    def test_dependabot_auto_merge_does_not_match_run_linked_to_another_pr_by_branch(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
-        other_pr_run = {
-            'id': 12, 'head_branch': 'dependabot/github_actions/checkout-7',
-            'pull_requests': [{'number': 8}], 'html_url': 'https://example.invalid/run/12',
-            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'success',
-        }
-        with patch.object(gr, 'gh_api', return_value={'workflow_runs': [other_pr_run]}):
-            check = scanner.dependabot_auto_merge('Org/repo', paths, [actions_dependabot_pr(number=7)])
-        self.assertEqual(check['status'], gr.WARN)
-        self.assertIn('no workflow run found for open PR #7', check['summary'])
-
-    def test_dependabot_auto_merge_keeps_failure_when_later_pr_history_is_inaccessible(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        paths = {'.github/workflows/auto-merge-dependabot-pull-requests.yml'}
         runs = [
-            {'id': 12, 'head_branch': 'dependabot/github_actions/checkout-7', 'pull_requests': [{'number': 7}],
-             'html_url': 'https://example.invalid/run/12', 'created_at': '2026-10-22T00:00:00Z',
-             'status': 'completed', 'conclusion': 'failure'},
-            {'id': 13, 'head_branch': 'dependabot/github_actions/setup-node-8', 'pull_requests': [{'number': 8}],
-             'html_url': 'https://example.invalid/run/13', 'created_at': '2026-10-23T00:00:00Z',
-             'status': 'completed', 'conclusion': 'failure'},
+            {'id': 8, 'run_number': 8, 'html_url': 'https://example.invalid/run/8',
+             'created_at': '2026-10-23T00:00:00Z', 'status': 'completed', 'conclusion': 'skipped'},
+            {'id': 7, 'run_number': 7, 'html_url': 'https://example.invalid/run/7',
+             'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'failure'},
         ]
-        responses = [
-            {'workflow_runs': runs},
-            {'jobs': [{'steps': [{'name': 'Fetch GitHub App token for target repo', 'conclusion': 'failure'}]}]},
-            gr.ApiError('HTTP 403: Resource not accessible by integration'),
-        ]
-        with patch.object(gr, 'gh_api', side_effect=responses):
-            check = scanner.dependabot_auto_merge(
-                'Org/repo', paths, [actions_dependabot_pr(7), actions_dependabot_pr(8)])
-        self.assertEqual(check['status'], gr.FAIL)
-        self.assertIn('Fetch GitHub App token', str(check['details']))
-        self.assertIn('Actions history access denied', str(check['details']))
+        with patch.object(gr, 'gh_api', return_value={'workflow_runs': runs}) as api:
+            check = scanner.dependabot_auto_merge('Org/repo')
+        self.assertEqual(check['status'], gr.OK)
+        self.assertIn('skipped', check['summary'])
+        self.assertEqual(api.call_count, 1)
+
+    def test_dependabot_auto_merge_failed_run_fails_and_access_error_is_unknown(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        with patch.object(gr, 'gh_api', return_value={'workflow_runs': [{
+            'id': 12, 'run_number': 4, 'html_url': 'https://example.invalid/run/12',
+            'created_at': '2026-10-22T00:00:00Z', 'status': 'completed', 'conclusion': 'failure',
+        }]}):
+            failed = scanner.dependabot_auto_merge('Org/repo')
+        self.assertEqual(failed['status'], gr.FAIL)
+        self.assertIn('failure', failed['summary'])
+
+        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('HTTP 403: Resource not accessible by integration')):
+            inaccessible = scanner.dependabot_auto_merge('Org/repo')
+        self.assertEqual(inaccessible['status'], gr.ERROR)
+        self.assertIn('HTTP 403', inaccessible['summary'])
+        self.assertIn('Actions: read', inaccessible['details'][0])
 
     def test_actions_history_error_classifies_disabled_and_hidden_404(self):
         disabled = gr.actions_history_error(gr.ApiError('Actions is disabled'))
-        self.assertEqual(disabled['status'], gr.FAIL)
+        self.assertEqual(disabled['status'], gr.NA)
+        self.assertIs(disabled['applicable'], False)
         self.assertIn('disabled', disabled['summary'])
         inaccessible = gr.actions_history_error(gr.ApiError('HTTP 404: Resource not found'))
         self.assertEqual(inaccessible['status'], gr.ERROR)
         self.assertIn('conceal inaccessible private resources', inaccessible['details'][0])
 
-    def test_default_branch_workflow_tree_is_used_when_scan_branch_differs(self):
+    def test_scan_branch_tree_is_used_for_workflow_checks(self):
         state = {'scan_branch': 'develop', 'blobs': {'only-develop.yml': 'sha-develop'}}
-        default_tree = {'tree': [
-            {'path': '.github/workflows/auto-merge-dependabot-pull-requests.yml', 'sha': 'sha-main', 'type': 'blob'},
-        ]}
-        with patch.object(gr, 'gh_api', return_value=default_tree) as api:
-            blobs = gr.Scanner._default_branch_blobs('Org/repo', 'main', state)
-        self.assertEqual(blobs, {'.github/workflows/auto-merge-dependabot-pull-requests.yml': 'sha-main'})
-        api.assert_called_once_with('repos/Org/repo/git/trees/main?recursive=1')
+        with patch.object(gr, 'gh_api') as api:
+            blobs = gr.Scanner._scan_branch_blobs('Org/repo', state)
+        self.assertEqual(blobs, {'only-develop.yml': 'sha-develop'})
+        api.assert_not_called()
 
-    def test_truncated_scan_tree_is_not_used_to_claim_default_workflow_missing(self):
-        state = {'scan_branch': 'main', 'blobs': {}, 'blobs_truncated': True}
-        with self.assertRaisesRegex(gr.ApiError, 'default-branch tree listing truncated'):
-            gr.Scanner._default_branch_blobs('Org/repo', 'main', state)
+    def test_truncated_scan_tree_is_not_used_to_claim_workflow_missing(self):
+        state = {'scan_branch': 'develop', 'blobs': {}, 'blobs_truncated': True}
+        with self.assertRaisesRegex(gr.ApiError, 'scan-branch tree listing truncated'):
+            gr.Scanner._scan_branch_blobs('Org/repo', state)
 
     def test_github_dot_repo_is_excluded(self):
         repos = [
@@ -933,6 +857,16 @@ class OtherCheckTests(unittest.TestCase):
         skipped = [{'status': 'completed', 'conclusion': 'skipped'}]
         self.assertEqual(gr.check_auto_backmerge(True, skipped)['status'], gr.NA)
 
+    def test_auto_backmerge_explicitly_disabled_actions_is_nonapplicable(self):
+        scanner = gr.Scanner.__new__(gr.Scanner)
+        with patch.object(gr, 'gh_api', return_value={'enabled': False}) as api:
+            check = scanner.auto_backmerge(
+                'Org/repo', {'.github/workflows/auto-back-merge.yml'})
+        self.assertEqual(check['status'], gr.NA)
+        self.assertIs(check['applicable'], False)
+        self.assertIn('explicitly disabled', check['summary'])
+        api.assert_called_once_with('repos/Org/repo/actions/permissions')
+
     def test_auto_backmerge_ignores_skipped_unmerged_pr_runs(self):
         runs = [
             {'status': 'completed', 'conclusion': 'skipped'},
@@ -978,8 +912,8 @@ class OtherCheckTests(unittest.TestCase):
         self.assertIn('Missing file: a\\|b', markdown)
         self.assertIn('No current PR is available to assess.', markdown)
         self.assertIn('Human PR age', markdown)
-        self.assertIn('no separate FAIL age threshold is currently configured', markdown)
-        self.assertIn('published on `National-Node-Net/ospo-resources` `main`, not `develop`', markdown)
+        self.assertIn('Scheduled reminders still cover stale non-draft human PRs to any base branch', markdown)
+        self.assertIn('workflow files on `National-Node-Net/ospo-resources` `develop`', markdown)
         self.assertNotIn('Related tools', markdown)
         self.assertNotIn('Not covered by this report', markdown)
         self.assertNotIn('| Repository | Visibility | Default |', markdown)
@@ -991,9 +925,9 @@ class OtherCheckTests(unittest.TestCase):
         self.assertIn('.result-summary{font-size:.75em', dashboard_html)
         self.assertNotIn('font-family', dashboard_html)
         self.assertNotIn('The font is inherited from the viewer', dashboard_html)
-        self.assertIn('Current Dependabot Actions<br>auto-merge state', dashboard_html)
+        self.assertIn('Dependabot Actions<br>auto-merge workflow result', dashboard_html)
         self.assertNotIn('Repository auto-merge enabled', dashboard_html)
-        self.assertIn('published on <code>National-Node-Net/ospo-resources</code> <code>main</code>', dashboard_html)
+        self.assertIn('workflow files on <code>National-Node-Net/ospo-resources</code> <code>develop</code>', dashboard_html)
         legend = dashboard_html.split('<h3>Templates and policy</h3>', 1)[1].split('</ul>', 1)[0]
         self.assertEqual(legend.count('<li>'), 11)
         self.assertNotIn('<p>', legend)
