@@ -151,16 +151,65 @@ class ProfileStatusTests(unittest.TestCase):
 
 
 class ActivityBadgeTests(unittest.TestCase):
-    def test_activity_badge_shows_whole_days_in_gray_regardless_of_age(self):
+    def test_activity_badge_threshold_is_inclusive_and_age_uses_whole_days(self):
         repository = make_repository()
         repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=180, hours=23))
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
         self.assertEqual(badge_value(badge), '180 days')
-        self.assertEqual(badge_color(badge), rb.GRAY)
+        self.assertEqual(badge_color(badge), rb.GREEN)
         self.assertIn('Days since last commit to develop branch', badge_root(badge).attrib['aria-label'])
         repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=181))
         badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['develop-activity.svg']
         self.assertEqual(badge_value(badge), '181 days')
+        self.assertEqual(badge_color(badge), rb.AMBER)
+
+    def test_activity_uses_report_threshold_not_a_hardcoded_window(self):
+        for days, expected in ((0, rb.GREEN), (14, rb.GREEN), (15, rb.AMBER)):
+            with self.subTest(days=days):
+                repository = make_repository()
+                repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=days))
+                report = make_report([repository])
+                report['parameters']['dormant_days'] = 14
+                badge = rb.generate_badges(report, NOW)[repository['name']]['develop-activity.svg']
+                self.assertEqual(badge_value(badge), f'{days} days')
+                self.assertEqual(badge_color(badge), expected)
+
+    def test_paused_override_keeps_numeric_age_gray_and_other_badges_unchanged(self):
+        for days in (1, 180, 181, 900):
+            with self.subTest(days=days):
+                repository = make_repository()
+                repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=days))
+                report = make_report([repository])
+                normal = rb.generate_badges(report, NOW)[repository['name']]
+                paused = rb.generate_badges(report, NOW, paused_repositories={'PUBLIC-REPO'})[repository['name']]
+                self.assertEqual(badge_value(paused['develop-activity.svg']), f'{days} days')
+                self.assertEqual(badge_color(paused['develop-activity.svg']), rb.GRAY)
+                self.assertEqual(paused['ospo-compliance.svg'], normal['ospo-compliance.svg'])
+                self.assertEqual(paused['last-checked.svg'], normal['last-checked.svg'])
+
+    def test_recent_work_branches_and_broader_report_activity_do_not_refresh_badge(self):
+        repository = make_repository()
+        repository['activity']['last_application_commit_at'] = timestamp(NOW - timedelta(days=181))
+        repository['activity']['last_commit_at'] = timestamp(NOW)
+        repository['activity']['active_work_branches'] = ['feature/recent']
+        repository['checks']['activity'] = {'status': gr.OK}
+        badges = rb.generate_badges(make_report([repository]), NOW)[repository['name']]
+        self.assertEqual(badge_color(badges['develop-activity.svg']), rb.AMBER)
+        self.assertEqual(badge_value(badges['develop-activity.svg']), '181 days')
+        self.assertEqual(badge_value(badges['ospo-compliance.svg']), 'pass')
+
+    def test_pausing_one_repository_does_not_change_other_repository_colors(self):
+        repositories = [make_repository('paused-repo'), make_repository('active-repo')]
+        badges = rb.generate_badges(make_report(repositories), NOW, paused_repositories={'paused-repo'})
+        self.assertEqual(badge_color(badges['paused-repo']['develop-activity.svg']), rb.GRAY)
+        self.assertEqual(badge_color(badges['active-repo']['develop-activity.svg']), rb.GREEN)
+
+    def test_pause_list_cannot_make_missing_activity_green_or_amber(self):
+        repository = make_repository()
+        repository['activity']['last_application_commit_at'] = None
+        badge = rb.generate_badges(make_report([repository]), NOW,
+                                   paused_repositories={'public-repo'})['public-repo']['develop-activity.svg']
+        self.assertEqual(badge_value(badge), 'unknown')
         self.assertEqual(badge_color(badge), rb.GRAY)
 
     def test_missing_bad_future_or_non_develop_activity_is_unknown(self):
@@ -304,6 +353,50 @@ class OutputTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), 'Generated badges for 1 repositories.\n')
             self.assertNotIn('private-repo', stdout.getvalue())
             self.assertTrue((output / 'repositories/private-repo/ospo-compliance.svg').is_file())
+
+    def test_cli_loads_pause_list_with_comments_blanks_and_case(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report_path = root / 'report.json'
+            report_path.write_text(json.dumps(make_report()), encoding='utf-8')
+            pause_list = root / 'paused.txt'
+            pause_list.write_text('# Maintained pause list\n\nPUBLIC-REPO\npublic-repo\n', encoding='utf-8')
+            with patch.object(rb.Path, 'cwd', return_value=root), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rb.main(['--report', str(report_path), '--output-dir', 'badges',
+                                          '--paused-repositories-file', str(pause_list)]), 0)
+            badge = (root / 'badges/repositories/public-repo/develop-activity.svg').read_text()
+            self.assertEqual(badge_value(badge), '12 days')
+            self.assertEqual(badge_color(badge), rb.GRAY)
+
+    def test_missing_or_invalid_pause_list_fails_before_badges_are_written(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report_path = root / 'report.json'
+            report_path.write_text(json.dumps(make_report()), encoding='utf-8')
+            pause_list = root / 'paused.txt'
+            for content in (None, 'other-org/repo\n', '../escape\n', 'repo*\n',
+                            'repo-a repo-b\n', 'repo-a,repo-b\n', 'repo-a # comment\n'):
+                with self.subTest(content=content):
+                    if content is not None:
+                        pause_list.write_text(content, encoding='utf-8')
+                    with patch.object(rb.Path, 'cwd', return_value=root), contextlib.redirect_stderr(io.StringIO()), \
+                            self.assertRaises(SystemExit):
+                        rb.main(['--report', str(report_path), '--output-dir', 'badges',
+                                 '--paused-repositories-file', str(pause_list)])
+                    self.assertFalse((root / 'badges').exists())
+
+    def test_cli_uses_default_pause_file_without_extra_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report_path = root / 'report.json'
+            report_path.write_text(json.dumps(make_report()), encoding='utf-8')
+            pause_list = root / 'paused.txt'
+            pause_list.write_text('public-repo\n', encoding='utf-8')
+            with patch.object(rb, 'PAUSED_REPOSITORIES_FILE', pause_list), \
+                    patch.object(rb.Path, 'cwd', return_value=root), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rb.main(['--report', str(report_path), '--output-dir', 'badges']), 0)
+            badge = (root / 'badges/repositories/public-repo/develop-activity.svg').read_text()
+            self.assertEqual(badge_color(badge), rb.GRAY)
 
 
 if __name__ == '__main__':

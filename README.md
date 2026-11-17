@@ -10,6 +10,8 @@ completed scan is within the freshness window. Full reports remain separate work
 
 ## Public repository governance
 
+After every completed scan (push, manual, or scheduled), a Markdown overview with frozen badge images is archived on the [`history/governance` branch](https://github.com/National-Node-Net/ndt-overwatch/tree/history/governance). Its index links to past scan snapshots; the table below remains the latest view.
+
 The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks.
 
 | Repository | OSPO compliance | Days since last commit to develop branch | Last checked |

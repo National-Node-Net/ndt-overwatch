@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta, timezone
 from html import escape
 from pathlib import Path
 
-from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN, safe_output_directory
+from governance_report import COLUMNS, ERROR, FAIL, NA, OK, STATUSES, WARN, read_list_file, safe_output_directory
 
 GREEN = '#1a7f37'
 AMBER = '#9a6700'
@@ -24,10 +24,27 @@ PROFILE_PASS_NA = {'develop', 'sbom', 'dependabot_auto_merge', 'auto_backmerge'}
 PROFILE_FAIL_NA = {'secret_scan'}
 COMPLIANCE_CHECKS = tuple(key for key, _title in COLUMNS if key != 'activity')
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+\Z')
+PAUSED_REPOSITORIES_FILE = Path(__file__).with_name('paused-development-repositories.txt')
 
 
 class InvalidReport(ValueError):
     """The report does not match the governance report interface."""
+
+
+def _paused_names(names):
+    if isinstance(names, str):
+        raise InvalidReport('paused repositories must be a collection of repository names')
+    paused = set()
+    for name in names:
+        if not isinstance(name, str) or not REPOSITORY_PATTERN.fullmatch(name) or name in ('.', '..'):
+            raise InvalidReport('invalid paused repository name')
+        paused.add(name.casefold())
+    return paused
+
+
+def load_paused_repositories(path):
+    """Load exactly one repository name per non-comment line, failing on malformed entries."""
+    return _paused_names(read_list_file(Path(path).read_text(encoding='utf-8')))
 
 
 def _timestamp(value):
@@ -135,19 +152,20 @@ def _profile_status(repository):
     return 'pass', GREEN
 
 
-def _activity(repository, completed_at):
+def _activity(repository, completed_at, threshold, *, paused=False):
     if completed_at is None:
-        return 'unknown'
+        return 'unknown', GRAY
     activity = repository.get('activity')
     if not isinstance(activity, dict) or activity.get('branch') != 'develop':
-        return 'unknown'
+        return 'unknown', GRAY
     committed_at = _timestamp(activity.get('last_application_commit_at'))
     if committed_at is None or committed_at > completed_at:
-        return 'unknown'
+        return 'unknown', GRAY
     age = (completed_at - committed_at).days
     if age < 0:
-        return 'unknown'
-    return f'{age} days'
+        return 'unknown', GRAY
+    color = GRAY if paused else GREEN if age <= threshold else AMBER
+    return f'{age} days', color
 
 
 def _last_checked(completed_at, now):
@@ -169,9 +187,10 @@ def _last_checked(completed_at, now):
     return value, RED
 
 
-def generate_badges(report, now=None):
+def generate_badges(report, now=None, *, paused_repositories=()):
     """Return three status-only SVG strings for every repository in the report."""
-    _validate_report(report)
+    threshold = _validate_report(report)
+    paused_names = _paused_names(paused_repositories)
     current_time = _validate_now(now if now is not None else datetime.now(timezone.utc))
     completed_at = _timestamp(report.get('completed_at'))
     if completed_at is not None and completed_at > current_time:
@@ -182,22 +201,25 @@ def generate_badges(report, now=None):
         develop_scanned = repository.get('scan_branch') == 'develop'
         if develop_scanned:
             profile_status, profile_color = _profile_status(repository)
-            activity = _activity(repository, completed_at)
+            activity, activity_color = _activity(
+                repository, completed_at, threshold,
+                paused=repository['name'].casefold() in paused_names)
             checked, checked_color = _last_checked(completed_at, current_time)
         else:
             profile_status, profile_color = 'unknown', GRAY
+            activity_color = GRAY
             activity, checked, checked_color = 'not checked', 'not checked', GRAY
         badges[repository['name']] = {
             BADGE_FILENAMES[0]: _badge_svg('OSPO compliance', profile_status, profile_color),
-            BADGE_FILENAMES[1]: _badge_svg('Days since last commit to develop branch', activity, GRAY),
+            BADGE_FILENAMES[1]: _badge_svg('Days since last commit to develop branch', activity, activity_color),
             BADGE_FILENAMES[2]: _badge_svg('Last checked', checked, checked_color),
         }
     return badges
 
 
-def write_badges(report, output_dir, now=None):
+def write_badges(report, output_dir, now=None, *, paused_repositories=()):
     """Replace OUTPUT/repositories with generated SVGs and return the badge map."""
-    badges = generate_badges(report, now=now)
+    badges = generate_badges(report, now=now, paused_repositories=paused_repositories)
     try:
         working_directory = Path.cwd().resolve()
         output_root = Path(output_dir).expanduser().resolve()
@@ -222,12 +244,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', required=True, type=Path, help='Governance report JSON file.')
     parser.add_argument('--output-dir', required=True, type=safe_output_directory, help='Badge output directory.')
+    parser.add_argument('--paused-repositories-file', type=Path, default=PAUSED_REPOSITORIES_FILE,
+                        help='One paused repository name per line; these Develop-age badges are gray.')
     args = parser.parse_args(argv)
 
     try:
         with args.report.open(encoding='utf-8') as handle:
             report = json.load(handle)
-        badges = write_badges(report, args.output_dir)
+        _validate_report(report)
+        paused = load_paused_repositories(args.paused_repositories_file)
+        badges = write_badges(report, args.output_dir, paused_repositories=paused)
     except (OSError, ValueError):
         parser.error('could not read a valid governance report or write SVG badges')
     print(f'Generated badges for {len(badges)} repositories.')
