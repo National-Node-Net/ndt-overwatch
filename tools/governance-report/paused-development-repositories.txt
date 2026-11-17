@@ -2,4 +2,5 @@
 # Names are case-insensitive; blank lines and lines beginning with # are ignored.
 # Listed repositories keep their Develop commit-age value but use a gray badge.
 # This list does not exclude repositories from scans or change OSPO compliance.
-# No repositories have been designated as paused yet.
+data-extractor
+jena-fuseki-kafka
