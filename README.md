@@ -7,10 +7,11 @@
 The central weekly scan publishes status-only badges for every included repository, public and private, to the
 `sync/governance-badges` branch. Badges show the latest saved check, not live results; `not checked` means no
 completed scan is within the freshness window. Full reports remain separate workflow artifacts.
+The **Days since last commit to develop branch** badge always remains gray; its number is informational only.
 
 ## Public repository governance
 
-After every completed scan (push, manual, or scheduled), a Markdown overview with frozen badge images is archived on the [`history/governance` branch](https://github.com/National-Node-Net/ndt-overwatch/tree/history/governance). Its index links to past scan snapshots; the table below remains the latest view.
+After every completed scan (push, manual, or scheduled), a Markdown overview with frozen badge images is archived on the [`sync/governance-history` branch](https://github.com/National-Node-Net/ndt-overwatch/tree/sync/governance-history). Its index links to past scan snapshots; the table below remains the latest view.
 
 The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks.
 

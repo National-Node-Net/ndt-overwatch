@@ -313,14 +313,14 @@ jobs:
 
           publish_dir="$RUNNER_TEMP/governance-history-repository"
           mkdir -p "$publish_dir"
-          git -C "$publish_dir" init --quiet --initial-branch=history/governance
+          git -C "$publish_dir" init --quiet --initial-branch=sync/governance-history
           git -C "$publish_dir" config user.name 'github-actions[bot]'
           git -C "$publish_dir" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git -C "$publish_dir" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          history_ref="$(git -C "$publish_dir" ls-remote --heads origin refs/heads/history/governance)"
+          history_ref="$(git -C "$publish_dir" ls-remote --heads origin refs/heads/sync/governance-history)"
           if [[ -n "$history_ref" ]]; then
-            git -C "$publish_dir" fetch --no-tags origin refs/heads/history/governance
-            git -C "$publish_dir" switch --quiet --force-create history/governance FETCH_HEAD
+            git -C "$publish_dir" fetch --no-tags origin refs/heads/sync/governance-history
+            git -C "$publish_dir" switch --quiet --force-create sync/governance-history FETCH_HEAD
           fi
 
           python3 tools/governance-report/governance_history.py append \
@@ -333,4 +333,4 @@ jobs:
           fi
           git -C "$publish_dir" commit --quiet \
             -m "chore(OSPO): archive governance scan ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}"
-          git -C "$publish_dir" push origin HEAD:refs/heads/history/governance
+          git -C "$publish_dir" push origin HEAD:refs/heads/sync/governance-history

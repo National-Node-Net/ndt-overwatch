@@ -96,7 +96,7 @@ class GovernanceHistoryTests(unittest.TestCase):
         self.prepare()
         self.assertTrue(self.append().is_dir())
 
-    def test_snapshot_freezes_color_even_after_pause_list_changes(self):
+    def test_snapshot_freezes_gray_activity_badge(self):
         completed = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
         self.report['repositories'][0]['activity'] = {
             'branch': 'develop', 'last_application_commit_at': '2026-11-05T12:00:00Z',
@@ -107,15 +107,17 @@ class GovernanceHistoryTests(unittest.TestCase):
         self.prepare()
         first = self.append()
         frozen = (first / 'badges/public_repo/develop-activity.svg').read_bytes()
-        self.assertIn(rb.GREEN.encode(), frozen)
+        self.assertIn(rb.GRAY.encode(), frozen)
 
-        gray = rb.generate_badges(self.report, completed, paused_repositories={'public_repo'})['public_repo']
-        for filename, svg in gray.items():
+        self.report['repositories'][0]['activity']['last_application_commit_at'] = '2025-01-01T00:00:00Z'
+        different_age = rb.generate_badges(self.report, completed)['public_repo']
+        for filename, svg in different_age.items():
             (self.badges / 'repositories/public_repo' / filename).write_text(svg, encoding='utf-8')
         self.prepare('paused', run_id='124')
         second = self.append('paused')
         self.assertEqual((first / 'badges/public_repo/develop-activity.svg').read_bytes(), frozen)
         self.assertIn(rb.GRAY, (second / 'badges/public_repo/develop-activity.svg').read_text())
+        self.assertIn('674 days', (second / 'badges/public_repo/develop-activity.svg').read_text())
 
     def test_all_events_are_supported(self):
         for event in gh.EVENTS:
