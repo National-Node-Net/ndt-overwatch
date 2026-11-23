@@ -68,9 +68,9 @@ COLUMNS = [
     ('sbom', 'Release SBOM asset'),
     ('delete_branch', 'Automatic branch deletion'),
     ('dependabot_auto_merge', 'Dependabot Actions auto-merge workflow result'),
-    ('activity', 'Recent repository activity'),
     ('workflows', 'OSPO workflow synchronization'),
     ('auto_backmerge', 'Main-to-develop back-merge'),
+    ('activity', 'Recent repository activity'),
 ]
 
 MATRIX_HEADERS = {

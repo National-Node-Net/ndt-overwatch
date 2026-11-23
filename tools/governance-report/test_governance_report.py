@@ -537,6 +537,9 @@ class WorkflowSourceTests(unittest.TestCase):
 
 
 class OtherCheckTests(unittest.TestCase):
+    def test_recent_repository_activity_is_the_final_report_column(self):
+        self.assertEqual(gr.COLUMNS[-1], ('activity', 'Recent repository activity'))
+
     def test_scan_state_reads_tree_from_resolved_scan_branch(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
         repo = {'name': 'repo-a', 'full_name': 'Org/repo-a', 'default_branch': 'main'}
