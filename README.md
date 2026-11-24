@@ -15,6 +15,15 @@ After every completed scan (push, manual, or scheduled), a Markdown overview wit
 
 The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks.
 
+### OSPO compliance legend
+
+- **Pass (green):** All compliance checks pass or qualify as not applicable.
+- **Fail (red):** At least one compliance check fails, such as a verified credential finding.
+- **Attention (amber):** No check fails, and at least one check has a warning; attention takes priority over unknown.
+- **Unknown (gray):** No check fails or warns, but a result is unavailable or cannot be verified, including an unavailable credential scan.
+
+For a `develop` scan, precedence is fail, then attention, then unknown, then pass. A repository not scanned on `develop` remains unknown. Commit age and last checked are separate and do not affect compliance.
+
 | Repository | OSPO compliance | Days since last commit to develop branch | Last checked |
 | --- | --- | --- | --- |
 | [archetypes](https://github.com/National-Node-Net/archetypes) | ![archetypes OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/archetypes/ospo-compliance.svg) | ![archetypes days since last commit to Develop](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/archetypes/develop-activity.svg) | ![archetypes last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/archetypes/last-checked.svg) |

@@ -131,8 +131,8 @@ class ProfileStatusTests(unittest.TestCase):
             ('auto_backmerge', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
             ('dependabot_auto_merge', {'status': gr.NA}, 'unknown', rb.GRAY),
             ('dependabot_auto_merge', {'status': gr.NA, 'applicable': False}, 'pass', rb.GREEN),
-            ('secret_scan', {'status': gr.NA}, 'fail', rb.RED),
-            ('secret_scan', {'status': gr.ERROR}, 'fail', rb.RED),
+            ('secret_scan', {'status': gr.NA}, 'unknown', rb.GRAY),
+            ('secret_scan', {'status': gr.ERROR}, 'unknown', rb.GRAY),
             ('dependabot_config', {'status': gr.NA}, 'unknown', rb.GRAY),
             ('delete_branch', {'status': gr.NA}, 'unknown', rb.GRAY),
             ('files', {'status': gr.NA}, 'unknown', rb.GRAY),
@@ -154,6 +154,19 @@ class ProfileStatusTests(unittest.TestCase):
         repository = make_repository()
         repository['checks']['files'] = {'status': gr.ERROR}
         self.assertEqual(rb._profile_status(repository), ('unknown', rb.GRAY))
+
+    def test_status_precedence_with_mixed_results(self):
+        repository = make_repository()
+        repository['checks']['files'] = {'status': gr.WARN}
+        self.assertEqual(rb._profile_status(repository), ('attention', rb.AMBER))
+        repository['checks']['templates'] = {'status': gr.ERROR}
+        self.assertEqual(rb._profile_status(repository), ('attention', rb.AMBER))
+        repository['checks']['secret_scan'] = {'status': gr.FAIL}
+        self.assertEqual(rb._profile_status(repository), ('fail', rb.RED))
+        repository['scan_branch'] = 'main'
+        badge = rb.generate_badges(make_report([repository]), NOW)[repository['name']]['ospo-compliance.svg']
+        self.assertEqual(badge_value(badge), 'unknown')
+        self.assertEqual(badge_color(badge), rb.GRAY)
 
 
 class ActivityBadgeTests(unittest.TestCase):

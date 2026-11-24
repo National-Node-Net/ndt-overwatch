@@ -90,6 +90,21 @@ class GovernanceHistoryTests(unittest.TestCase):
         self.prepare()
         self.assertTrue(self.append().is_dir())
 
+    def test_legend_is_included_in_public_and_empty_overviews(self):
+        for output, repositories in (('public', self.report['repositories']),
+                                     ('empty', [make_repository('private-only', 'private')])):
+            with self.subTest(output=output):
+                report = copy.deepcopy(self.report)
+                report['repositories'] = repositories
+                markdown = (self.prepare(output=output, report=report) / 'README.md').read_text()
+                for text in ('## OSPO compliance legend', '**Pass (green):**', '**Fail (red):**',
+                             '**Unknown (gray):**', '**Attention (amber):**',
+                             'including an unavailable credential scan',
+                             'precedence is fail, then attention, then unknown, then pass',
+                             'Commit age and last checked are separate'):
+                    self.assertIn(text, markdown)
+                self.assertLess(markdown.index('## OSPO compliance legend'), markdown.index('| Repository |'))
+
     def test_completed_scan_with_unknown_check_results_is_archived(self):
         self.report['repositories'][0]['checks']['auto_backmerge']['status'] = gr.ERROR
         self.report['repositories'][1]['checks']['dependabot_auto_merge']['status'] = gr.ERROR
@@ -238,6 +253,22 @@ class GovernanceHistoryTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertEqual((git / 'config').read_bytes(), b'untouched git data')
         self.assertEqual((self.archive / 'keep.txt').read_bytes(), b'unrelated')
+
+    def test_append_preserves_legacy_snapshot_without_legend(self):
+        legacy = self.prepare('legacy')
+        readme = legacy / 'README.md'
+        markdown = readme.read_text()
+        start = markdown.index('## OSPO compliance legend')
+        end = markdown.index('| Repository |', start)
+        readme.write_text(markdown[:start] + markdown[end:])
+        archived = self.append('legacy')
+        prior = tree_bytes(archived)
+
+        self.prepare('new', run_id='124')
+        new = self.append('new')
+        self.assertIn('## OSPO compliance legend', (new / 'README.md').read_text())
+        self.assertEqual(tree_bytes(archived), prior)
+        self.assertNotIn('## OSPO compliance legend', (archived / 'README.md').read_text())
 
     def test_identical_duplicate_is_idempotent_including_snapshot_mtime(self):
         self.prepare()

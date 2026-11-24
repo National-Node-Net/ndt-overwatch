@@ -21,7 +21,6 @@ GRAY = '#6e7781'
 GRACE = timedelta(hours=6)
 BADGE_FILENAMES = ('ospo-compliance.svg', 'develop-activity.svg', 'last-checked.svg')
 PROFILE_PASS_NA = {'develop', 'sbom', 'dependabot_auto_merge', 'auto_backmerge'}
-PROFILE_FAIL_NA = {'secret_scan'}
 COMPLIANCE_CHECKS = tuple(key for key, _title in COLUMNS if key != 'activity')
 REPOSITORY_PATTERN = re.compile(r'[A-Za-z0-9_.-]+\Z')
 
@@ -111,13 +110,9 @@ def _profile_check_status(key, check):
             if key in ('dependabot_auto_merge', 'auto_backmerge') and applicable is not False:
                 return 'unknown'
             return OK
-        if key in PROFILE_FAIL_NA:
-            return FAIL
         return 'unknown'
     if applicable is False or status not in STATUSES:
         return 'unknown'
-    if status == ERROR and key == 'secret_scan':
-        return FAIL
     return 'unknown' if status == ERROR else status
 
 
@@ -130,10 +125,10 @@ def _profile_status(repository):
                            if not error.startswith('activity:')]
     if FAIL in statuses:
         return 'fail', RED
-    if 'unknown' in statuses or non_activity_errors:
-        return 'unknown', GRAY
     if WARN in statuses:
         return 'attention', AMBER
+    if 'unknown' in statuses or non_activity_errors:
+        return 'unknown', GRAY
     return 'pass', GREEN
 
 

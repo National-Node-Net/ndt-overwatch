@@ -612,13 +612,14 @@ class OtherCheckTests(unittest.TestCase):
             self.assertTrue(scanner.repo_setting('Org/repo-a', state, 'allow_auto_merge'))
         api.assert_called_once_with('repos/Org/repo-a', token='test-writer-token')
 
-    def test_scanner_error_is_processing_error(self):
-        scanner = gr.Scanner.__new__(gr.Scanner)
-        scanner.org = 'Org'
+    def test_unavailable_secret_scan_is_not_a_fatal_processing_error(self):
         repo = {'name': 'repo-a', 'full_name': 'Org/repo-a', 'default_branch': 'main', 'html_url': 'https://example.invalid'}
-        with patch.object(gr, 'gh_api', side_effect=gr.ApiError('unavailable')):
-            entry = scanner.scan(repo, gr.check_secret_scan(0, error='scanner failed'))
-        self.assertIn('secret_scan: scanner failed', entry['errors'])
+        for check in (gr.check_secret_scan(0, available=False, reason='GitHub token unavailable'),
+                      gr.check_secret_scan(0, error='scanner failed')):
+            with self.subTest(status=check['status']):
+                entry = gr.Scanner._new_scan_entry(repo, check)
+                self.assertEqual(entry['errors'], [])
+                self.assertEqual(entry['checks']['secret_scan'], check)
 
     def test_scanner_exports_qualified_activity_without_parsing_summary(self):
         scanner = gr.Scanner.__new__(gr.Scanner)
@@ -856,9 +857,13 @@ class OtherCheckTests(unittest.TestCase):
 
     def test_auto_backmerge_missing_or_no_attempts(self):
         self.assertEqual(gr.check_auto_backmerge(False, [])['status'], gr.FAIL)
-        self.assertEqual(gr.check_auto_backmerge(True, [])['status'], gr.NA)
+        no_attempts = gr.check_auto_backmerge(True, [])
+        self.assertEqual(no_attempts['status'], gr.NA)
+        self.assertIs(no_attempts['applicable'], False)
         skipped = [{'status': 'completed', 'conclusion': 'skipped'}]
-        self.assertEqual(gr.check_auto_backmerge(True, skipped)['status'], gr.NA)
+        no_attempts = gr.check_auto_backmerge(True, skipped)
+        self.assertEqual(no_attempts['status'], gr.NA)
+        self.assertIs(no_attempts['applicable'], False)
 
     def test_auto_backmerge_explicitly_disabled_actions_is_nonapplicable(self):
         scanner = gr.Scanner.__new__(gr.Scanner)

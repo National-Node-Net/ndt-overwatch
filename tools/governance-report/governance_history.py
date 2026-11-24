@@ -119,6 +119,16 @@ def prepare(report, badges_dir, output_dir, *, repository, run_id, run_attempt, 
         f'- Run: [run {run_id}, attempt {run_attempt}]'
         f'(https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt})',
         f'- Event: {_markdown(event)}', '',
+        '## OSPO compliance legend', '',
+        '- **Pass (green):** All compliance checks pass or qualify as not applicable.',
+        '- **Fail (red):** At least one compliance check fails, such as a verified credential finding.',
+        '- **Attention (amber):** No check fails, and at least one check has a warning. Attention takes priority over unknown.',
+        '- **Unknown (gray):** No check fails or warns, but a result is unavailable or cannot be verified, '
+        'including an unavailable credential scan.',
+        '',
+        'For a `develop` scan, precedence is fail, then attention, then unknown, then pass. '
+        'A repository not scanned on `develop` remains unknown. '
+        'Commit age and last checked are separate and do not affect compliance.', '',
         '| Repository | ' + ' | '.join(LABELS) + ' |',
         '| --- | --- | --- | --- |',
     ]

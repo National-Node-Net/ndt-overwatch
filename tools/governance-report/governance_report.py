@@ -551,7 +551,10 @@ def check_auto_backmerge(workflow_present, runs):
         return result(FAIL, 'workflow missing from develop branch', ['.github/workflows/auto-back-merge.yml is missing from develop.'])
     attempts = [run for run in runs if run.get('conclusion') != 'skipped']
     if not attempts:
-        return result(NA, 'no back-merge attempts recorded')
+        return {
+            **result(NA, 'no back-merge attempts recorded; treated as not applicable'),
+            'applicable': False,
+        }
 
     latest = attempts[0]
     run_id = latest.get('run_number', latest.get('id', '?'))
@@ -742,8 +745,6 @@ class Scanner:
             'fork': repo.get('fork', False),
             'checks': {'secret_scan': secret_result}, 'errors': [],
         }
-        if secret_result['status'] in (ERROR, NA):
-            entry['errors'].append(f'secret_scan: {secret_result["summary"]}')
         return entry
 
     def _load_scan_state(self, repo, entry):
