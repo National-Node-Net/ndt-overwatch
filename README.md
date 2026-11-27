@@ -2,6 +2,7 @@
 
 Immutable overviews for completed scans.
 
+- [2026-11-27 / run-46020183018-attempt-1](snapshots/2026-11-27/run-46020183018-attempt-1/README.md)
 - [2026-11-24 / run-45392219036-attempt-1](snapshots/2026-11-24/run-45392219036-attempt-1/README.md)
 - [2026-11-24 / run-45392175487-attempt-1](snapshots/2026-11-24/run-45392175487-attempt-1/README.md)
 - [2026-11-23 / run-45187236505-attempt-1](snapshots/2026-11-23/run-45187236505-attempt-1/README.md)
