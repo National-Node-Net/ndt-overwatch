@@ -1,28 +1,21 @@
-# README
-
 [![OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/ospo-compliance.svg)](tools/governance-report/README.md)
 [![Days since last commit to develop branch](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/develop-activity.svg)](tools/governance-report/README.md)
 [![Last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/ndt-overwatch/last-checked.svg)](tools/governance-report/README.md)
+# README
+**Repository:** `ndt-overwatch`  
+**Description:** `The ndt-overwatch repository serves as the central hub for executing organisation-wide automations across the National Digital Twin Programme (NDTP). It houses automated workflows and scripts designed to enforce governance standards, gather compliance metrics, and streamline administrative tasks.`  
 
-The central weekly scan publishes status-only badges for every included repository, public and private, to the
-`sync/governance-badges` branch. Badges show the latest saved check, not live results; `not checked` means no
-completed scan is within the freshness window. Full reports remain separate workflow artifacts.
-The **Days since last commit to develop branch** badge always remains gray; its number is informational only.
+**SPDX-License-Identifier:** `Apache-2.0 AND OGL-UK-3.0`
+
+## Overview
+
+The NDTP Open Source Program Office (OSPO) use this repository as a dedicated location to manage and execute organisation-wide governance and utility automations across the National Digital Twin Programme (NDTP). Future use cases include gathering compliance reports and testing metrics, enhancing efficiency, reducing manual effort, and promoting consistency in how governance is applied throughout the Programme.
+
+## Prerequisites
+
+The contents maintained in this repository are designed for use with GitHub.
 
 ## Public repository governance
-
-After every completed scan (push, manual, or scheduled), a Markdown overview with frozen badge images is archived on the [`sync/governance-history` branch](https://github.com/National-Node-Net/ndt-overwatch/tree/sync/governance-history). Its index links to past scan snapshots; the table below remains the latest view.
-
-The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks.
-
-### OSPO compliance legend
-
-- **Pass (green):** All compliance checks pass or qualify as not applicable.
-- **Fail (red):** At least one compliance check fails, such as a verified credential finding.
-- **Attention (amber):** No check fails, and at least one check has a warning; attention takes priority over unknown.
-- **Unknown (gray):** No check fails or warns, but a result is unavailable or cannot be verified, including an unavailable credential scan.
-
-For a `develop` scan, precedence is fail, then attention, then unknown, then pass. A repository not scanned on `develop` remains unknown. Commit age and last checked are separate and do not affect compliance.
 
 | Repository | OSPO compliance | Days since last commit to develop branch | Last checked |
 | --- | --- | --- | --- |
@@ -48,17 +41,19 @@ For a `develop` scan, precedence is fail, then attention, then unknown, then pas
 | [secure-agent-graph](https://github.com/National-Node-Net/secure-agent-graph) | ![secure-agent-graph OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/secure-agent-graph/ospo-compliance.svg) | ![secure-agent-graph days since last commit to Develop](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/secure-agent-graph/develop-activity.svg) | ![secure-agent-graph last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/secure-agent-graph/last-checked.svg) |
 | [secure-agents-lib](https://github.com/National-Node-Net/secure-agents-lib) | ![secure-agents-lib OSPO compliance](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/secure-agents-lib/ospo-compliance.svg) | ![secure-agents-lib days since last commit to Develop](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/secure-agents-lib/develop-activity.svg) | ![secure-agents-lib last checked](https://raw.githubusercontent.com/National-Node-Net/ndt-overwatch/sync/governance-badges/repositories/secure-agents-lib/last-checked.svg) |
 
-**Repository:** `ndt-overwatch`  
-**Description:** `The ndt-overwatch repository serves as the central hub for executing organisation-wide automations across the National Digital Twin Programme (NDTP). It houses automated workflows and scripts designed to enforce governance standards, gather compliance metrics, and streamline administrative tasks.`  
-**SPDX-License-Identifier:** `Apache-2.0 AND OGL-UK-3.0`
 
-## Overview
+The central weekly scan publishes status-only badges, after every completed scan, a Markdown overview with frozen badge images is archived on the [`sync/governance-history` branch](https://github.com/National-Node-Net/ndt-overwatch/tree/sync/governance-history). Its index links to past scan snapshots; the table above remains the latest view.
 
-The NDTP Open Source Program Office (OSPO) use this repository as a dedicated location to manage and execute organisation-wide governance and utility automations across the National Digital Twin Programme (NDTP). Future use cases include gathering compliance reports and testing metrics, enhancing efficiency, reducing manual effort, and promoting consistency in how governance is applied throughout the Programme.
+The **OSPO compliance** badge is based on the governance files, templates, Dependabot configuration and PR age, verified credential scan, SBOM, automatic branch deletion, Dependabot auto-merge state, workflow synchronization, and main-to-develop back-merge checks.
 
-## Prerequisites
+### OSPO compliance legend
 
-The contents maintained in this repository are designed for use with GitHub.
+- **Pass (green):** All compliance checks pass or qualify as not applicable.
+- **Fail (red):** At least one compliance check fails, such as a verified credential finding.
+- **Attention (amber):** No check fails, and at least one check has a warning; attention takes priority over unknown.
+- **Unknown (gray):** No check fails or warns, but a result is unavailable or cannot be verified.
+
+Commit age and last checked are separate and do not affect compliance.
 
 ## Features
 
@@ -68,7 +63,7 @@ An automated process to generate a consolidated, de-duplicated register of suppl
 
 ### Organisation Governance Report
 
-The `OSPO governance report` workflow scans active organisation repositories and produces Markdown, HTML, and JSON dashboards covering governance files, templates, Dependabot policy and pull requests, releases and SBOMs, repository settings, activity, workflow status, and verified TruffleHog findings. It runs weekly and can be dispatched manually after the workflow is available on the default branch. See [`tools/governance-report/README.md`](tools/governance-report/README.md) for check definitions, permissions, and manual-run guidance.
+The `OSPO governance report` workflow scans active organisation repositories and produces Markdown, HTML, and JSON dashboards covering governance files, templates, Dependabot policy and pull requests, releases and SBOMs, repository settings, activity, workflow status, and verified TruffleHog findings. It runs weekly and can be dispatched manually. See [`tools/governance-report/README.md`](tools/governance-report/README.md) for check definitions, permissions, and manual-run guidance.
 
 ## Public Funding Acknowledgment
 

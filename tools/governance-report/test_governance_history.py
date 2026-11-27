@@ -99,7 +99,7 @@ class GovernanceHistoryTests(unittest.TestCase):
                 markdown = (self.prepare(output=output, report=report) / 'README.md').read_text()
                 for text in ('## OSPO compliance legend', '**Pass (green):**', '**Fail (red):**',
                              '**Unknown (gray):**', '**Attention (amber):**',
-                             'including an unavailable credential scan',
+                             'No check fails or warns, but a result is unavailable or cannot be verified.',
                              'precedence is fail, then attention, then unknown, then pass',
                              'Commit age and last checked are separate'):
                     self.assertIn(text, markdown)

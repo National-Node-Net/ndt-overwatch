@@ -123,8 +123,7 @@ def prepare(report, badges_dir, output_dir, *, repository, run_id, run_attempt, 
         '- **Pass (green):** All compliance checks pass or qualify as not applicable.',
         '- **Fail (red):** At least one compliance check fails, such as a verified credential finding.',
         '- **Attention (amber):** No check fails, and at least one check has a warning. Attention takes priority over unknown.',
-        '- **Unknown (gray):** No check fails or warns, but a result is unavailable or cannot be verified, '
-        'including an unavailable credential scan.',
+        '- **Unknown (gray):** No check fails or warns, but a result is unavailable or cannot be verified.',
         '',
         'For a `develop` scan, precedence is fail, then attention, then unknown, then pass. '
         'A repository not scanned on `develop` remains unknown. '
