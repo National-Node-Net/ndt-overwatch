@@ -1,0 +1,13 @@
+# Repository-relative glob patterns ignored only when every changed path matches.
+# README.md and application documentation deliberately remain project activity.
+.github/**
+ACKNOWLEDGEMENTS.md
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+LICENSE
+LICENSE.*
+MAINTAINERS.md
+NOTICE.md
+OGL_LICENSE.md
+SECURITY.md
